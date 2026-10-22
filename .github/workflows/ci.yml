@@ -1,0 +1,42 @@
+# CI — berjalan otomatis di GitHub Actions setiap push / pull request
+# yang menyentuh example-app/**. Isinya: vet + build semua service Go,
+# lalu build image Docker untuk memastikan Dockerfile sehat.
+# (CD-nya terpisah: pull-based di VPS, khusus env dev — lihat
+#  docs/tutorial-deploy-cicd.md)
+name: CI Example App
+
+on:
+  push:
+    paths:
+      - "example-app/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "example-app/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: example-app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go (versi mengikuti go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: example-app/go.mod
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build semua service
+        run: go build ./...
+
+      - name: Docker build (gateway)
+        run: docker build --build-arg CMD=gateway -t example-gateway:ci .
+
+      - name: Docker build (scheduler)
+        run: docker build --build-arg CMD=scheduler -t example-scheduler:ci .
