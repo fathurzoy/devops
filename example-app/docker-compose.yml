@@ -65,10 +65,10 @@ services:
       SERVICE_NAME: api-gateway
       ENV_NAME: ${ENV_NAME:-production}
       APP_VERSION: ${APP_VERSION:-v1.0.0}
-      USER_SERVICE_URL: http://user-service:8080
-      NOTIFICATION_SERVICE_URL: http://notification-service:8080
-      SCHEDULER_SERVICE_URL: http://scheduler-service:8080
-      ORDER_UPSTREAMS: ${ORDER_UPSTREAMS:-http://order-service:8080}
+      USER_SERVICE_URL: http://${NAME_PREFIX:-example-}user-service:8080
+      NOTIFICATION_SERVICE_URL: http://${NAME_PREFIX:-example-}notification-service:8080
+      SCHEDULER_SERVICE_URL: http://${NAME_PREFIX:-example-}scheduler:8080
+      ORDER_UPSTREAMS: ${ORDER_UPSTREAMS:-http://${NAME_PREFIX:-example-}order-service:8080}
       GATEWAY_ADMIN_TOKEN: ${GATEWAY_ADMIN_TOKEN:-}
       PORT: "8080"
     ports:
@@ -118,7 +118,7 @@ services:
       ENV_NAME: ${ENV_NAME:-production}
       APP_VERSION: ${APP_VERSION:-v1.0.0}
       DATABASE_URL: postgres://example:${POSTGRES_PASSWORD}@postgres:5432/exampledb?sslmode=disable
-      USER_SERVICE_URL: http://user-service:8080
+      USER_SERVICE_URL: http://${NAME_PREFIX:-example-}user-service:8080
       RABBITMQ_URL: amqp://example:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       PORT: "8080"
     depends_on:
@@ -127,6 +127,8 @@ services:
     mem_limit: 96m
     networks:
       example-net:
+        aliases:
+          - ${NAME_PREFIX:-example-}order-service
       platform-net:
         aliases:
           - ${NAME_PREFIX:-example-}order-service
@@ -147,7 +149,7 @@ services:
       ENV_NAME: ${ENV_NAME:-production}
       APP_VERSION: ${GREEN_APP_VERSION:-v1.1.0}
       DATABASE_URL: postgres://example:${POSTGRES_PASSWORD}@postgres:5432/exampledb?sslmode=disable
-      USER_SERVICE_URL: http://user-service:8080
+      USER_SERVICE_URL: http://${NAME_PREFIX:-example-}user-service:8080
       RABBITMQ_URL: amqp://example:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       PORT: "8080"
     depends_on:
@@ -155,7 +157,9 @@ services:
       - rabbitmq
     mem_limit: 96m
     networks:
-      - example-net
+      example-net:
+        aliases:
+          - ${NAME_PREFIX:-example-}order-green
 
   scheduler-service:
     build:
@@ -170,7 +174,7 @@ services:
       SERVICE_NAME: scheduler-service
       ENV_NAME: ${ENV_NAME:-production}
       APP_VERSION: ${APP_VERSION:-v1.0.0}
-      ORDER_SERVICE_URL: http://order-service:8080
+      ORDER_SERVICE_URL: http://${NAME_PREFIX:-example-}order-service:8080
       REDIS_ADDR: redis:6379
       SCHED_INTERVAL_SEC: ${SCHED_INTERVAL_SEC:-60}
       SCHED_JOB_DURATION_MS: "3000"

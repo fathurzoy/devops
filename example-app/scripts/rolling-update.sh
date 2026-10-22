@@ -11,7 +11,7 @@
 # gateway terus-menerus — TIDAK BOLEH ada satu pun respons non-200.
 #
 # Rollback kapan pun sebelum langkah 5: arahkan upstream kembali ke blue
-# (POST /admin/upstreams {"upstreams":["http://order-service:8080"]}).
+# (POST /admin/upstreams {"upstreams":["http://<prefix-env>order-service:8080"]}).
 set -uo pipefail
 
 TARGET="${1:-}"
@@ -21,9 +21,12 @@ DEV_DIR="$HOME/example-app-dev"
 cd "$DEV_DIR"
 COMPOSE="docker compose --env-file app.env --env-file secrets.env"
 TOKEN="$(grep -E '^GATEWAY_ADMIN_TOKEN=' secrets.env | cut -d= -f2-)"
+PREFIX="$(grep -E '^NAME_PREFIX=' app.env | cut -d= -f2-)"
 GW="http://127.0.0.1:18100"
-BLUE="http://order-service:8080"
-GREEN="http://order-green:8080"
+# Alamat upstream WAJIB memakai nama unik per env (container name / alias unik),
+# jangan nama service polos: nama polos bertabrakan antar env di jaringan bersama.
+BLUE="http://${PREFIX}order-service:8080"
+GREEN="http://${PREFIX}order-green:8080"
 log() { echo "[$(date +%T)] $*"; }
 
 # --- Checker latar: catat semua kode status selama proses ---
