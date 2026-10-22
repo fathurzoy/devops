@@ -1,0 +1,34 @@
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["platform-node-exporter:9100"]
+        labels:
+          instance: vps-utama
+
+  - job_name: cadvisor
+    scrape_interval: 30s
+    scrape_timeout: 25s
+    static_configs:
+      - targets: ["platform-cadvisor:8080"]
+        labels:
+          instance: vps-utama
+
+  - job_name: example
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets:
+          - "example-gateway:8080"
+          - "example-user-service:8080"
+          - "example-order-service:8080"
+          - "example-notification-service:8080"
+        labels:
+          app: example-app
