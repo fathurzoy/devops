@@ -108,6 +108,17 @@ sum by (env) (rate(http_requests_total{status=~"5.."}[5m]))         # error per 
 Sudah disediakan dashboard **“Example App per Environment”** di Grafana yang
 membandingkan request rate ketiga env dalam satu layar.
 
+> ⚠️ **Peringatan isolasi (pelajaran nyata dari pembangunan setup ini):**
+> jangan pernah memanggil service dengan nama polosnya (`user-service`,
+> `order-service`) dari container yang juga terhubung ke jaringan bersama
+> `platform-net`. Nama polos itu alias DNS di semua project yang berbagi
+> jaringan tersebut, jadi panggilan bisa dijawab container **env sebelah**
+> (kasus nyata: data seed dev/staging sempat masuk ke database prod!).
+> Semua alamat antar-service di setup ini memakai nama unik per env —
+> nama container / alias ber-prefix dari `NAME_PREFIX`
+> (mis. `http://example-dev-user-service:8080`). Prometheus juga men-scrape
+> memakai nama unik tersebut.
+
 ## Menambah Environment Baru (mis. `qa`)
 
 1. Salin folder: `cp -r ~/example-app-dev ~/example-app-qa`

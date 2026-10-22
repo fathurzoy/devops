@@ -21,6 +21,7 @@ scrape_configs:
         labels:
           instance: vps-utama
 
+  # --- Example App per environment: label env membedakan dev/staging/prod ---
   - job_name: example
     scrape_interval: 15s
     scrape_timeout: 10s
@@ -30,5 +31,35 @@ scrape_configs:
           - "example-user-service:8080"
           - "example-order-service:8080"
           - "example-notification-service:8080"
+          - "example-scheduler:8080"
         labels:
           app: example-app
+          env: production
+
+  - job_name: example-staging
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets:
+          - "example-staging-gateway:8080"
+          - "example-staging-user-service:8080"
+          - "example-staging-order-service:8080"
+          - "example-staging-notification-service:8080"
+          - "example-staging-scheduler:8080"
+        labels:
+          app: example-app
+          env: staging
+
+  - job_name: example-dev
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets:
+          - "example-dev-gateway:8080"
+          - "example-dev-user-service:8080"
+          - "example-dev-order-service:8080"
+          - "example-dev-notification-service:8080"
+          - "example-dev-scheduler:8080"
+        labels:
+          app: example-app
+          env: development

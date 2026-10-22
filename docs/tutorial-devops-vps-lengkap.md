@@ -22,6 +22,7 @@ Semua password di dokumen ini **tidak ditulis** — password selalu diambil dari
 13. Cheatsheet Perintah
 14. Troubleshooting Umum
 15. Batasan & Pengembangan Selanjutnya
+16. Perkembangan Lanjutan — Environment dev/staging/prod, Scheduler Terpusat, HA & Blue-Green, CI/CD (dokumen pendamping: `tutorial-environment-dev-staging-prod.md`, `tutorial-deploy-cicd.md`, `tutorial-backup-restore-copy.md`, `tutorial-tambah-service-baru.md`, `tutorial-ha-dan-scheduler.md`)
 
 ---
 
@@ -44,6 +45,9 @@ Di akhir perjalanan ini, di VPS ada tiga kelompok hal:
 | FE2 — Dashboard Admin/Toko | http://43.167.194.197:3201 | tanpa login (untuk belajar) |
 | API Gateway | http://43.167.194.197:18080 | tanpa login (untuk belajar) |
 | RabbitMQ Management | http://43.167.194.197:15673 | user `example`, password dari `~/example-app/.env` |
+| FE1/FE2 **staging** | http://43.167.194.197:3300 / http://43.167.194.197:3301 | gateway :18090, RabbitMQ Mgmt :15683 |
+| FE1/FE2 **dev** | http://43.167.194.197:3400 / http://43.167.194.197:3401 | gateway :18100, RabbitMQ Mgmt :15693 |
+| Grafana — dashboard per environment | http://43.167.194.197:3100/d/example-per-env/example-app-per-environment | bandingkan traffic dev/staging/prod |
 | Prometheus | hanya lokal server `127.0.0.1:9091` | lewat Grafana saja (lihat penjelasan keamanan di Bab 6) |
 | Loki | hanya lokal server `127.0.0.1:3101` | lewat Grafana Explore |
 
@@ -486,6 +490,103 @@ Jalur pengembangan alami berikutnya:
 3. Tambah **Jaeger/Tempo + OpenTelemetry** untuk visual waterfall tracing (trace_id sudah jadi fondasinya).
 4. CI/CD: build image di GitHub Actions → deploy otomatis (GitOps) ke server.
 5. Alerting: Alertmanager → Telegram/email untuk error rate & disk.
+
+---
+
+## 16. Perkembangan Lanjutan — Env Bertingkat, Scheduler, HA, CI/CD
+
+Di sore yang sama (22 Oktober 2026), example app naik kelas dari “satu
+lingkungan untuk belajar” menjadi miniatur cara kerja tim beneran. Ringkasannya
+di sini; detail langkah demi langkahnya ada di lima dokumen pendamping di
+folder `docs/` yang sama.
+
+### 16.1 Environment development / staging / production
+
+Example app sekarang hidup dalam **tiga environment** yang terisolasi —
+masing-masing dengan PostgreSQL, Redis, RabbitMQ, dan passwordnya sendiri:
+
+| Env | FE1/FE2 | Gateway | Folder | Project Compose |
+|---|---|---|---|---|
+| development | :3400 / :3401 | :18100 | `~/example-app-dev` | `example-app-dev` |
+| staging | :3300 / :3301 | :18090 | `~/example-app-staging` | `example-app-staging` |
+| production | :3200 / :3201 | :18080 | `~/example-app` | `example-app` |
+
+Satu file `docker-compose.yml` dipakai semua env; pembedanya file `app.env`
+(non-rahasia, masuk Git di `example-app/env/*.env`) + `secrets.env` (password,
+hanya di server). Grouping-nya terlihat di mana-mana: nama container &
+project di Portainer, label `compose_project` di Loki, dan label `env` di
+metrik Prometheus — lengkap dengan dashboard Grafana **“Example App per
+Environment”**. Detail: **`tutorial-environment-dev-staging-prod.md`**.
+
+> **Pelajaran mahal dari tahap ini:** nama service polos (`user-service`)
+> di jaringan Docker bersama (`platform-net`) bertabrakan antar env — DNS
+> bisa menjawab dengan container env sebelah, dan data seed kami sempat
+> masuk ke database env yang salah! Solusinya: alamat antar-service memakai
+> **nama unik per env** (nama container / alias ber-prefix, mis.
+> `example-dev-user-service`). Di Kubernetes, masalah ini tidak ada karena
+> ada namespace — di Compose, kedisiplinan penamaan adalah penggantinya.
+
+### 16.2 Scheduler terpusat
+
+Service keempat bergabung: **scheduler-service**. Polanya meniru koreksi dari
+pengalaman kantor (scheduler di tiap service = job dobel saat replica
+banyak): satu scheduler menembak `POST /jobs/cleanup-demo` ke order-service,
+dengan **lock Redis (SET NX EX)** — job yang masih jalan membuat eksekusi
+berikutnya tercatat `SKIPPED_LOCKED`, bukan dobel. Ada panel khususnya di FE
+(panel G) dan endpoint internal job-nya **tidak** dibuka lewat gateway.
+Detail & skenario demonya: **`tutorial-ha-dan-scheduler.md`** (Bagian 2).
+
+### 16.3 HA: replica & blue-green
+
+Order-service prod kini jalan **2 replica** di belakang gateway
+(round-robin + resolve DNS per request); panel H di FE (“Hit Order-Service
+10x”) membuktikan dua hostname bergantian menjawab. Untuk update tanpa
+downtime ada **blue-green** di dev: `scripts/rolling-update.sh v1.1.0`
+menyalakan versi baru (green) dulu, health-check, mengalihkan trafik
+bertahap lewat daftar upstream gateway, mematikan blue terakhir — terbukti
+**0 request gagal dari 34 request** selama proses. Detail:
+**`tutorial-ha-dan-scheduler.md`** (Bagian 1). Catatan: Latihan 5 di Bab 12
+sekarang sudah bisa dilanjutkan — order-service memang sudah multi-replica.
+
+### 16.4 CI/CD: otomatis di dev, promosi manual ke staging & prod
+
+- **CI** — GitHub Actions (`.github/workflows/ci.yml`): `go vet`, `go build`,
+  `docker build` setiap push yang menyentuh `example-app/**`. (Status saat
+  dokumen ini diperbarui: file workflow sudah dibuat & tervalidasi; untuk
+  mulai berjalan di GitHub ia menunggu satu kali penambahan izin *scope
+  workflow* pada token akses — lihat `tutorial-deploy-cicd.md` Bagian B.)
+- **CD dev** — pull-based GitOps-lite: cron di VPS tiap 1 menit menjalankan
+  `~/deploy/deploy-dev.sh`; commit baru di repo yang menyentuh example-app
+  otomatis ter-deploy ke dev (terbukti: bump `APP_VERSION` dev ke v1.0.1
+  murni lewat push, dev berubah sendiri tanpa disentuh). Log di
+  `~/deploy/deploy.log`.
+- **Staging & prod** — *tidak* otomatis, meniru pola kantor: promosi manual
+  dengan checklist + perintah + rollback.
+
+Detail semuanya, termasuk cara deploy manual lewat Portainer dan perbandingan
+dengan Jenkins: **`tutorial-deploy-cicd.md`**.
+
+### 16.5 Backup, restore & tambah service
+
+- Backup/restore PostgreSQL per env sudah ada script-nya
+  (`example-app/scripts/backup-db.sh`, `restore-db.sh`, hasil di
+  `~/backups/example/<env>/`) dan **uji restore ke database sementara sudah
+  dilakukan**. Cara menyalin data antar env juga didokumentasikan:
+  **`tutorial-backup-restore-copy.md`**.
+- Menambah service baru (mis. `menu-service` → `/api/menu`,
+  `auth-service` → `/api/auth`) ternyata cuma soal: buat service berpola
+  sama, daftarkan di Compose, tambah satu baris rute di gateway, tambah
+  target scrape Prometheus. Panduan + latihannya:
+  **`tutorial-tambah-service-baru.md`**.
+
+### 16.6 Tata folder VPS sekarang
+
+```text
+~/example-app/          prod        ~/deploy/            clone repo + CD dev
+~/example-app-staging/  staging     ~/backups/example/   hasil backup per env
+~/example-app-dev/      dev         ~/tutorial/          semua file tutorial ini
+~/devops-platform/      Portainer/Grafana/Prometheus/Loki
+```
 
 ---
 

@@ -66,6 +66,16 @@ Cara membaca hasilnya: GitHub → repo → tab **Actions**. Hijau = aman; merah 
 klik run-nya, baca step yang gagal (biasanya vet/build), perbaiki, push lagi.
 **CI tidak men-deploy apa pun** — dia hanya penjaga gerbang kualitas.
 
+> **Status pengaktifan (22 Okt 2026):** file workflow ini sudah dibuat dan
+> lolos validasi YAML, tetapi GitHub menolak push file di folder
+> `.github/workflows/` dari token OAuth hasil *device flow* karena token itu
+> belum memiliki **scope `workflow`**. Obatnya satu kali saja, pilih salah
+> satu: (1) jalankan `gh auth refresh -h github.com -s workflow` lalu
+> setujui kode device yang muncul — sesudah itu push file workflow seperti
+> biasa; atau (2) unggah file `.github/workflows/ci.yml` lewat antarmuka web
+> GitHub (tombol *Add file → Upload files* di repo). Begitu file-nya berada di
+> repo, workflow langsung aktif pada push berikutnya.
+
 ## C. CD — Auto-Deploy Pull-Based Khusus DEV
 
 Karena VPS tidak membuka port khusus untuk Jenkins/GitHub menembak masuk,
