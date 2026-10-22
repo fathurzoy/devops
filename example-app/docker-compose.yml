@@ -1,3 +1,10 @@
+# Example App — SATU file Compose untuk semua environment (dev/staging/prod).
+# Yang membedakan env hanyalah file variabelnya:
+#   docker compose --env-file app.env --env-file secrets.env up -d
+# - app.env     : non-rahasia (nama project, port, ENV_NAME, APP_VERSION) — MASUK Git (env/*.env)
+# - secrets.env : password & token — HANYA di server, chmod 600, TIDAK masuk Git.
+name: ${PROJECT_NAME:-example-app}
+
 services:
   frontend-fe1:
     build:
@@ -5,16 +12,20 @@ services:
       dockerfile: Dockerfile
       args:
         CMD: frontend
-    image: example-frontend:latest
-    container_name: example-fe1
+    image: example-frontend:${IMG_TAG:-prod}
+    container_name: ${NAME_PREFIX:-example-}fe1
     restart: unless-stopped
     environment:
       SERVICE_NAME: frontend-fe1
       FE_ID: fe1
+      ENV_NAME: ${ENV_NAME:-production}
+      APP_VERSION: ${APP_VERSION:-v1.0.0}
+      GATEWAY_PUBLIC_PORT: ${GW_PORT:-18080}
+      RABBITMQ_PUBLIC_PORT: ${MQ_MGMT_PORT:-15673}
       PORT: "8080"
     ports:
-      - "3200:8080"
-    mem_limit: 96m
+      - "${FE1_PORT:-3200}:8080"
+    mem_limit: 64m
     networks:
       - example-net
 
@@ -24,16 +35,20 @@ services:
       dockerfile: Dockerfile
       args:
         CMD: frontend
-    image: example-frontend:latest
-    container_name: example-fe2
+    image: example-frontend:${IMG_TAG:-prod}
+    container_name: ${NAME_PREFIX:-example-}fe2
     restart: unless-stopped
     environment:
       SERVICE_NAME: frontend-fe2
       FE_ID: fe2
+      ENV_NAME: ${ENV_NAME:-production}
+      APP_VERSION: ${APP_VERSION:-v1.0.0}
+      GATEWAY_PUBLIC_PORT: ${GW_PORT:-18080}
+      RABBITMQ_PUBLIC_PORT: ${MQ_MGMT_PORT:-15673}
       PORT: "8080"
     ports:
-      - "3201:8080"
-    mem_limit: 96m
+      - "${FE2_PORT:-3201}:8080"
+    mem_limit: 64m
     networks:
       - example-net
 
@@ -43,18 +58,22 @@ services:
       dockerfile: Dockerfile
       args:
         CMD: gateway
-    image: example-gateway:latest
-    container_name: example-gateway
+    image: example-gateway:${IMG_TAG:-prod}
+    container_name: ${NAME_PREFIX:-example-}gateway
     restart: unless-stopped
     environment:
       SERVICE_NAME: api-gateway
-      USER_SERVICE_URL: http://example-user-service:8080
-      ORDER_SERVICE_URL: http://example-order-service:8080
-      NOTIFICATION_SERVICE_URL: http://example-notification-service:8080
+      ENV_NAME: ${ENV_NAME:-production}
+      APP_VERSION: ${APP_VERSION:-v1.0.0}
+      USER_SERVICE_URL: http://user-service:8080
+      NOTIFICATION_SERVICE_URL: http://notification-service:8080
+      SCHEDULER_SERVICE_URL: http://scheduler-service:8080
+      ORDER_UPSTREAMS: ${ORDER_UPSTREAMS:-http://order-service:8080}
+      GATEWAY_ADMIN_TOKEN: ${GATEWAY_ADMIN_TOKEN:-}
       PORT: "8080"
     ports:
-      - "18080:8080"
-    mem_limit: 128m
+      - "${GW_PORT:-18080}:8080"
+    mem_limit: 96m
     networks:
       - example-net
       - platform-net
@@ -65,18 +84,20 @@ services:
       dockerfile: Dockerfile
       args:
         CMD: userservice
-    image: example-user-service:latest
-    container_name: example-user-service
+    image: example-user-service:${IMG_TAG:-prod}
+    container_name: ${NAME_PREFIX:-example-}user-service
     restart: unless-stopped
     environment:
       SERVICE_NAME: user-service
-      DATABASE_URL: postgres://example:${POSTGRES_PASSWORD}@example-postgres:5432/exampledb?sslmode=disable
-      REDIS_ADDR: example-redis:6379
+      ENV_NAME: ${ENV_NAME:-production}
+      APP_VERSION: ${APP_VERSION:-v1.0.0}
+      DATABASE_URL: postgres://example:${POSTGRES_PASSWORD}@postgres:5432/exampledb?sslmode=disable
+      REDIS_ADDR: redis:6379
       PORT: "8080"
     depends_on:
       - postgres
       - redis
-    mem_limit: 128m
+    mem_limit: 96m
     networks:
       - example-net
       - platform-net
@@ -87,19 +108,77 @@ services:
       dockerfile: Dockerfile
       args:
         CMD: orderservice
-    image: example-order-service:latest
-    container_name: example-order-service
+    image: example-order-service:${IMG_TAG:-prod}
+    # TANPA container_name: service ini yang di-scale (replica) untuk HA.
     restart: unless-stopped
+    deploy:
+      replicas: ${ORDER_REPLICAS:-1}
     environment:
       SERVICE_NAME: order-service
-      DATABASE_URL: postgres://example:${POSTGRES_PASSWORD}@example-postgres:5432/exampledb?sslmode=disable
-      USER_SERVICE_URL: http://example-user-service:8080
-      RABBITMQ_URL: amqp://example:${RABBITMQ_PASSWORD}@example-rabbitmq:5672/
+      ENV_NAME: ${ENV_NAME:-production}
+      APP_VERSION: ${APP_VERSION:-v1.0.0}
+      DATABASE_URL: postgres://example:${POSTGRES_PASSWORD}@postgres:5432/exampledb?sslmode=disable
+      USER_SERVICE_URL: http://user-service:8080
+      RABBITMQ_URL: amqp://example:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       PORT: "8080"
     depends_on:
       - postgres
       - rabbitmq
-    mem_limit: 128m
+    mem_limit: 96m
+    networks:
+      example-net:
+      platform-net:
+        aliases:
+          - ${NAME_PREFIX:-example-}order-service
+
+  # order-green: pasangan blue-green (hanya diaktifkan profil "bluegreen",
+  # dipakai script rolling-update di env dev). Versinya GREEN_APP_VERSION.
+  order-green:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CMD: orderservice
+    image: example-order-service:${IMG_TAG:-prod}
+    profiles: ["bluegreen"]
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: order-service
+      ENV_NAME: ${ENV_NAME:-production}
+      APP_VERSION: ${GREEN_APP_VERSION:-v1.1.0}
+      DATABASE_URL: postgres://example:${POSTGRES_PASSWORD}@postgres:5432/exampledb?sslmode=disable
+      USER_SERVICE_URL: http://user-service:8080
+      RABBITMQ_URL: amqp://example:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      PORT: "8080"
+    depends_on:
+      - postgres
+      - rabbitmq
+    mem_limit: 96m
+    networks:
+      - example-net
+
+  scheduler-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CMD: scheduler
+    image: example-scheduler:${IMG_TAG:-prod}
+    container_name: ${NAME_PREFIX:-example-}scheduler
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: scheduler-service
+      ENV_NAME: ${ENV_NAME:-production}
+      APP_VERSION: ${APP_VERSION:-v1.0.0}
+      ORDER_SERVICE_URL: http://order-service:8080
+      REDIS_ADDR: redis:6379
+      SCHED_INTERVAL_SEC: ${SCHED_INTERVAL_SEC:-60}
+      SCHED_JOB_DURATION_MS: "3000"
+      PORT: "8080"
+    depends_on:
+      - redis
+      - order-service
+    mem_limit: 96m
     networks:
       - example-net
       - platform-net
@@ -110,30 +189,32 @@ services:
       dockerfile: Dockerfile
       args:
         CMD: notification
-    image: example-notification-service:latest
-    container_name: example-notification-service
+    image: example-notification-service:${IMG_TAG:-prod}
+    container_name: ${NAME_PREFIX:-example-}notification-service
     restart: unless-stopped
     environment:
       SERVICE_NAME: notification-service
-      RABBITMQ_URL: amqp://example:${RABBITMQ_PASSWORD}@example-rabbitmq:5672/
+      ENV_NAME: ${ENV_NAME:-production}
+      APP_VERSION: ${APP_VERSION:-v1.0.0}
+      RABBITMQ_URL: amqp://example:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       PORT: "8080"
     depends_on:
       - rabbitmq
-    mem_limit: 128m
+    mem_limit: 96m
     networks:
       - example-net
       - platform-net
 
   postgres:
     image: postgres:16-alpine
-    container_name: example-postgres
+    container_name: ${NAME_PREFIX:-example-}postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: example
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: exampledb
     ports:
-      - "127.0.0.1:15432:5432"
+      - "127.0.0.1:${PG_PORT:-15432}:5432"
     volumes:
       - example_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -141,33 +222,33 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-    mem_limit: 256m
+    mem_limit: 192m
     networks:
       - example-net
 
   redis:
     image: redis:7-alpine
-    container_name: example-redis
+    container_name: ${NAME_PREFIX:-example-}redis
     restart: unless-stopped
     ports:
-      - "127.0.0.1:16379:6379"
-    mem_limit: 96m
+      - "127.0.0.1:${REDIS_PORT:-16379}:6379"
+    mem_limit: 64m
     networks:
       - example-net
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
-    container_name: example-rabbitmq
+    container_name: ${NAME_PREFIX:-example-}rabbitmq
     restart: unless-stopped
     environment:
       RABBITMQ_DEFAULT_USER: example
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
     ports:
-      - "127.0.0.1:15672:5672"
-      - "15673:15672"
+      - "127.0.0.1:${MQ_AMQP_PORT:-15672}:5672"
+      - "${MQ_MGMT_PORT:-15673}:15672"
     volumes:
       - example_mqdata:/var/lib/rabbitmq
-    mem_limit: 384m
+    mem_limit: 256m
     networks:
       - example-net
 

@@ -69,6 +69,8 @@ func main() {
 	mux.HandleFunc("POST /orders/{id}/status", updateStatus)
 	mux.HandleFunc("GET /simulate/error", simError)
 	mux.HandleFunc("GET /simulate/slow", simSlow)
+	mux.HandleFunc("GET /whoami", whoami)
+	mux.HandleFunc("POST /jobs/cleanup-demo", jobCleanupDemo)
 	port := httpx.Env("PORT", "8080")
 	httpx.Log("info", "", "listen :"+port)
 	if err := http.ListenAndServe(":"+port, httpx.Middleware(mux)); err != nil {
@@ -135,6 +137,7 @@ func createOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, 201, map[string]any{
 		"order": o, "trace_id": trace, "rabbitmq": mqStatus,
+		"version": httpx.AppVersion, "replica": httpx.Hostname(),
 		"flow": []string{"api-gateway", "order-service", "user-service (validasi)", "postgres (simpan)", "rabbitmq (order.created)", "notification-service (konsumsi)"},
 	})
 }
@@ -195,7 +198,49 @@ func updateStatus(w http.ResponseWriter, r *http.Request) {
 	} else {
 		httpx.Log("info", trace, "status order diubah & event terpublish", "order_id", o.ID, "status_baru", o.Status)
 	}
-	httpx.WriteJSON(w, 200, map[string]any{"order": o, "trace_id": trace, "rabbitmq": mqStatus})
+	httpx.WriteJSON(w, 200, map[string]any{"order": o, "trace_id": trace, "rabbitmq": mqStatus, "version": httpx.AppVersion, "replica": httpx.Hostname()})
+}
+
+// whoami: identitas instance yang menjawab (bukti load balancing antar-replica).
+func whoami(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteJSON(w, 200, map[string]any{
+		"service": httpx.ServiceName, "replica": httpx.Hostname(),
+		"version": httpx.AppVersion, "env": httpx.EnvName,
+		"trace_id": httpx.TraceID(r.Context()),
+	})
+}
+
+// jobCleanupDemo: endpoint JOB internal (hanya dipanggil scheduler-service,
+// TIDAK diekspos lewat gateway). Mensimulasikan pekerjaan selama duration_ms.
+func jobCleanupDemo(w http.ResponseWriter, r *http.Request) {
+	trace := httpx.TraceID(r.Context())
+	var in struct {
+		DurationMs int    `json:"duration_ms"`
+		Job        string `json:"job"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	if in.DurationMs <= 0 {
+		in.DurationMs = 3000
+	}
+	if in.DurationMs > 20000 {
+		in.DurationMs = 20000
+	}
+	if in.Job == "" {
+		in.Job = "cleanup-demo"
+	}
+	start := time.Now()
+	httpx.Log("info", trace, "JOB cleanup-demo MULAI dikerjakan order-service",
+		"job", in.Job, "duration_ms", in.DurationMs, "replica", httpx.Hostname(), "version", httpx.AppVersion)
+	time.Sleep(time.Duration(in.DurationMs) * time.Millisecond)
+	dur := time.Since(start)
+	httpx.Log("info", trace, "JOB cleanup-demo SELESAI dikerjakan order-service",
+		"job", in.Job, "duration_ms", float64(dur.Microseconds())/1000.0, "replica", httpx.Hostname())
+	httpx.WriteJSON(w, 200, map[string]any{
+		"job": in.Job, "status": "done", "duration_ms": float64(dur.Microseconds()) / 1000.0,
+		"replica": httpx.Hostname(), "version": httpx.AppVersion, "env": httpx.EnvName,
+		"trace_id": trace, "finished_at": time.Now().UTC().Format(time.RFC3339),
+		"ringkasan": "membersihkan data demo kedaluwarsa (simulasi)",
+	})
 }
 
 func simError(w http.ResponseWriter, r *http.Request) {

@@ -24,6 +24,8 @@ func main() {
 		"__PEER_LABEL__", peerLabel,
 		"__FE_COLOR__", color,
 		"__FE_DESC__", desc,
+		"__GW_PORT__", httpx.Env("GATEWAY_PUBLIC_PORT", "18080"),
+		"__MQ_PORT__", httpx.Env("RABBITMQ_PUBLIC_PORT", "15673"),
 	).Replace(pageHTML)
 
 	mux := http.NewServeMux()
@@ -62,7 +64,7 @@ table{border-collapse:collapse;width:100%;font-size:13px} td,th{border-bottom:1p
 ul.feed{list-style:none;padding:0;margin:6px 0} ul.feed li{border-bottom:1px solid #334155;padding:7px 2px;font-size:13px;line-height:1.5}
 .small{font-size:11.5px;color:#94a3b8;word-break:break-all}
 </style></head><body>
-<header><h1>__FE_TITLE__</h1><p>__FE_DESC__<br>Frontend ini (<b>__FE_ID__</b>) hanya memanggil <b>api-gateway</b>. Ia <b>tidak pernah</b> bicara langsung ke frontend lain — semua interaksi antar-FE lewat backend + event RabbitMQ.</p></header>
+<header><h1>__FE_TITLE__</h1><p>__FE_DESC__<br>Frontend ini (<b>__FE_ID__</b>) hanya memanggil <b>api-gateway</b>. Ia <b>tidak pernah</b> bicara langsung ke frontend lain — semua interaksi antar-FE lewat backend + event RabbitMQ.<br>Environment: <b id="envInfo">memuat...</b></p></header>
 <main>
 <div id="meta">Belum ada request. Klik tombol mana saja, hasilnya muncul di panel output paling bawah tiap section (panel bersama).</div>
 <button class="alt" onclick="copyLoki()">Salin Query Loki untuk trace_id terakhir</button>
@@ -100,7 +102,7 @@ ul.feed{list-style:none;padding:0;margin:6px 0} ul.feed li{border-bottom:1px sol
 <label>Teks pesan</label><input id="mqText" value="Halo RabbitMQ dari FE">
 <button onclick="callAPI('Publish RabbitMQ','POST','/api/rabbitmq/publish',{text:val('mqText'),from:'__FE_ID__',target:'all'})">Kirim Pesan ke RabbitMQ (queue manual.events)</button>
 <button onclick="callAPI('Pesan Terkirim','GET','/api/notifications')">Lihat Pesan yang Sudah Dikonsumsi Notification Service</button>
-<p class="note">Management UI RabbitMQ: port 15673 di alamat server ini (login dari file .env project example-app di server).</p></section>
+<p class="note">Management UI RabbitMQ environment ini: port __MQ_PORT__ di alamat server ini (login dari file secrets.env environment ini di server).</p></section>
 
 <section><h2>E. Simulasi — Error, Lambat, Spam (bahan Grafana)</h2>
 <button class="danger" onclick="callAPI('Simulasi Error','GET','/api/simulate/error')">Simulasi Error 500 (order-service)</button>
@@ -116,10 +118,23 @@ ul.feed{list-style:none;padding:0;margin:6px 0} ul.feed li{border-bottom:1px sol
 <button class="alt" onclick="refreshInbox(true)">Refresh Manual</button>
 <ul class="feed" id="inbox"><li class="small">Memuat...</li></ul></section>
 
+<section><h2>G. Scheduler Terpusat — 1 Penjadwal untuk Semua Service</h2>
+<p class="note">Dulu tiap service memasang scheduler sendiri &rarr; saat replica banyak, job jalan dobel &amp; bentrok. Di sini hanya <b>scheduler-service</b> yang menjadwalkan: tiap interval ia <b>menembak API</b> order-service (<code>POST /jobs/cleanup-demo</code>, endpoint internal yang tidak dibuka lewat gateway). Sebelum jalan ia mengambil <b>lock di Redis</b>; kalau job sebelumnya masih jalan, eksekusi berikutnya <b>dilewati (SKIPPED_LOCKED)</b>.</p>
+<div id="schedInfo" class="note">Memuat status scheduler...</div>
+<button onclick="runSched(3000)">Jalankan Sekarang (normal 3 detik)</button>
+<button class="alt" onclick="runSchedSlow()">Jalankan Job Lambat (15 detik) lalu Coba Lagi</button>
+<button class="alt" onclick="refreshSched(true)">Refresh Status</button>
+<div id="schedTable" style="margin-top:8px"></div></section>
+
+<section><h2>H. HA — Replica &amp; Load Balancing Order-Service</h2>
+<p class="note">Order-service bisa jalan lebih dari 1 replica di belakang gateway; gateway memilih upstream bergantian (round-robin) dan me-resolve DNS per request, jadi replica berganti-ganti yang menjawab. Tombol ini memukul <code>/whoami</code> 10x dan menampilkan replica (hostname) + versi yang menjawab.</p>
+<button onclick="haCheck()">Hit Order-Service 10x — Replica Mana Saja yang Menjawab?</button>
+<div id="haOut" style="margin-top:8px"></div></section>
+
 <section><h2>Panel Output</h2><pre id="out">// Hasil request terakhir tampil di sini (JSON + status + durasi + trace_id)</pre></section>
 </main>
 <script>
-var GW = 'http://' + location.hostname + ':18080';
+var GW = 'http://' + location.hostname + ':__GW_PORT__';
 var MY = '__FE_ID__';
 var lastTrace = '';
 function val(id){ return document.getElementById(id).value; }
@@ -204,6 +219,64 @@ async function spam(){
   await Promise.all(jobs);
   show('Spam 20x', 200, Math.round(performance.now()-t0), lastTrace, 'Selesai: ' + ok + '/20 request OK ke GET /api/users. Buka Grafana (dashboard Node Exporter / cAdvisor atau Explore Prometheus: rate(http_requests_total[1m])) untuk melihat lonjakan traffic.');
 }
-refreshOrders(false); refreshInbox(false);
-setInterval(refreshOrders, 5000); setInterval(refreshInbox, 4000);
+async function refreshSched(manual){
+  try{
+    var res = await fetch(GW + '/api/scheduler/status');
+    var d = await res.json();
+    document.getElementById('schedInfo').innerHTML =
+      'env: <b>' + d.env + '</b> | interval: <b>' + d.interval_sec + ' detik</b> | job: <b>' + d.job + '</b> &rarr; ' + d.target +
+      ' | lock Redis <code>' + d.lock_key + '</code>: <b>' + (d.lock_held ? 'SEDANG TERPEGANG (ada job jalan)' : 'bebas') + '</b>';
+    var runs = d.runs || [];
+    var html = '<table><tr><th>Waktu (UTC)</th><th>Sumber</th><th>Status</th><th>Durasi</th><th>Replica</th><th>trace_id</th><th></th></tr>';
+    runs.slice(0,12).forEach(function(x){
+      var badge = x.status==='SUCCESS' ? 'APPROVED' : (x.status==='SKIPPED_LOCKED' ? 'CREATED' : (x.status==='RUNNING' ? 'DONE' : 'REJECTED'));
+      html += '<tr><td>' + (x.started_at||'') + '</td><td>' + x.source + '</td><td><span class="badge ' + badge + '">' + x.status + '</span></td><td>' + Math.round(x.duration_ms||0) + ' ms</td><td>' + (x.replica||'-') + '</td><td class="small">' + (x.trace_id||'') + '</td><td><button class="alt" onclick="copyLokiTrace(\'' + (x.trace_id||'') + '\')">Loki</button></td></tr>';
+    });
+    html += '</table>';
+    document.getElementById('schedTable').innerHTML = runs.length ? html : '<p class="note">Belum ada run. Tunggu tick pertama atau klik Jalankan Sekarang.</p>';
+    if(manual) show('Status Scheduler', res.status, 0, d.trace_id, d);
+  }catch(e){ if(manual) show('Status Scheduler','ERROR',0,'',String(e)); }
+}
+function copyLokiTrace(t){
+  if(!t){ alert('trace_id kosong'); return; }
+  var q = '{container=~"example-.+"} |= "' + t + '"';
+  navigator.clipboard.writeText(q).then(function(){ alert('Query Loki tersalin. Trace ini muncul di log scheduler-service DAN order-service:\n' + q); });
+}
+async function runSched(ms){
+  var r = await callAPI('Scheduler Run-Now ' + ms + 'ms','POST','/api/scheduler/run-now',{duration_ms:ms});
+  refreshSched(false);
+  return r;
+}
+async function runSchedSlow(){
+  show('Job Lambat','...',0,'','Menjalankan job 15 detik (tidak ditunggu selesai di panel ini)...');
+  fetch(GW + '/api/scheduler/run-now', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({duration_ms:15000})}).catch(function(){});
+  await new Promise(function(z){ setTimeout(z, 1200); });
+  var r2 = await callAPI('Run Kedua (harus SKIPPED_LOCKED)','POST','/api/scheduler/run-now',{duration_ms:3000});
+  refreshSched(false);
+  if(r2 && r2.data && r2.data.run){ alert('Status run kedua: ' + r2.data.run.status + ' — kalau SKIPPED_LOCKED, berarti lock bekerja: job lambat yang masih jalan menahan eksekusi berikutnya.'); }
+  setTimeout(refreshSched, 16000);
+}
+async function haCheck(){
+  var t0 = performance.now();
+  try{
+    var res = await fetch(GW + '/api/ha/check?n=10');
+    var d = await res.json();
+    var html = '<p class="note">Upstream aktif: <b>' + (d.upstreams_aktif||[]).join(', ') + '</b> | total ' + d.total + ' hit, gagal ' + d.gagal + '</p>';
+    html += '<table><tr><th>Replica (hostname) | Version</th><th>Jumlah Jawaban</th></tr>';
+    Object.keys(d.ringkasan||{}).forEach(function(k){ html += '<tr><td>' + k + '</td><td>' + d.ringkasan[k] + '</td></tr>'; });
+    html += '</table>';
+    document.getElementById('haOut').innerHTML = html;
+    show('HA Check 10x', res.status, Math.round(performance.now()-t0), d.trace_id, d);
+  }catch(e){ show('HA Check','ERROR',0,'',String(e)); }
+}
+async function loadEnvInfo(){
+  try{
+    var res = await fetch(GW + '/api/health/all');
+    var d = await res.json();
+    var gw = d.services && d.services['api-gateway'];
+    if(gw) document.getElementById('envInfo').textContent = gw.env + ' | versi gateway ' + gw.version;
+  }catch(e){}
+}
+refreshOrders(false); refreshInbox(false); refreshSched(false); loadEnvInfo();
+setInterval(refreshOrders, 5000); setInterval(refreshInbox, 4000); setInterval(refreshSched, 5000);
 </script></body></html>`

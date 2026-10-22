@@ -18,6 +18,22 @@ import (
 
 var ServiceName = "unknown"
 
+// EnvName & AppVersion dibaca sekali dari environment container.
+// ENV_NAME: development / staging / production. APP_VERSION: versi rilis (mis. v1.0.0).
+var EnvName = func() string {
+	if v := os.Getenv("ENV_NAME"); v != "" {
+		return v
+	}
+	return "production"
+}()
+
+var AppVersion = func() string {
+	if v := os.Getenv("APP_VERSION"); v != "" {
+		return v
+	}
+	return "v1.0.0"
+}()
+
 type ctxKey struct{}
 
 var logMu sync.Mutex
@@ -29,6 +45,7 @@ func Log(level, traceID, msg string, kv ...any) {
 		"time":     time.Now().UTC().Format(time.RFC3339Nano),
 		"level":    level,
 		"service":  ServiceName,
+		"env":      EnvName,
 		"trace_id": traceID,
 		"message":  msg,
 	}
@@ -93,8 +110,8 @@ func MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# TYPE http_requests_total counter")
 	for _, k := range keys {
 		p := strings.SplitN(k, "|", 3)
-		fmt.Fprintf(w, "http_requests_total{service=\"%s\",endpoint=\"%s\",method=\"%s\",status=\"%s\"} %d\n",
-			escLabel(ServiceName), escLabel(p[0]), escLabel(p[1]), escLabel(p[2]), reqCounts[k])
+		fmt.Fprintf(w, "http_requests_total{service=\"%s\",env=\"%s\",endpoint=\"%s\",method=\"%s\",status=\"%s\"} %d\n",
+			escLabel(ServiceName), escLabel(EnvName), escLabel(p[0]), escLabel(p[1]), escLabel(p[2]), reqCounts[k])
 	}
 	fmt.Fprintln(w, "# HELP http_request_duration_seconds Durasi request HTTP (sum & count)")
 	fmt.Fprintln(w, "# TYPE http_request_duration_seconds summary")
@@ -104,8 +121,8 @@ func MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(eps)
 	for _, e := range eps {
-		fmt.Fprintf(w, "http_request_duration_seconds_sum{service=\"%s\",endpoint=\"%s\"} %f\n", escLabel(ServiceName), escLabel(e), reqDurSum[e])
-		fmt.Fprintf(w, "http_request_duration_seconds_count{service=\"%s\",endpoint=\"%s\"} %d\n", escLabel(ServiceName), escLabel(e), reqDurCount[e])
+		fmt.Fprintf(w, "http_request_duration_seconds_sum{service=\"%s\",env=\"%s\",endpoint=\"%s\"} %f\n", escLabel(ServiceName), escLabel(EnvName), escLabel(e), reqDurSum[e])
+		fmt.Fprintf(w, "http_request_duration_seconds_count{service=\"%s\",env=\"%s\",endpoint=\"%s\"} %d\n", escLabel(ServiceName), escLabel(EnvName), escLabel(e), reqDurCount[e])
 	}
 }
 
@@ -186,9 +203,15 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// HealthHandler handler GET /health standar.
+// HealthHandler handler GET /health standar (memuat env & versi aplikasi).
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
-	WriteJSON(w, 200, map[string]any{"service": ServiceName, "status": "ok", "trace_id": TraceID(r.Context())})
+	WriteJSON(w, 200, map[string]any{"service": ServiceName, "status": "ok", "env": EnvName, "version": AppVersion, "trace_id": TraceID(r.Context())})
+}
+
+// Hostname mengembalikan nama container/host (dipakai sebagai identitas replica).
+func Hostname() string {
+	h, _ := os.Hostname()
+	return h
 }
 
 // Env membaca env dengan default.

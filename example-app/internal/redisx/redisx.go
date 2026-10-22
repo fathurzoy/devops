@@ -108,6 +108,17 @@ func (c *Client) Del(key string) error {
 	return err
 }
 
+// SetNX melakukan SET key value NX EX ttlSec: hanya berhasil bila key belum ada.
+// Dipakai sebagai kunci (lock) terdistribusi oleh scheduler-service.
+func (c *Client) SetNX(key, value string, ttlSec int) (bool, error) {
+	v, err := c.do("SET", key, value, "NX", "EX", strconv.Itoa(ttlSec))
+	if err != nil {
+		return false, err
+	}
+	s, ok := v.(string)
+	return ok && s == "OK", nil
+}
+
 func (c *Client) Incr(key string) (int64, error) {
 	v, err := c.do("INCR", key)
 	if err != nil {
