@@ -318,10 +318,21 @@ func testSpikeErrors(w http.ResponseWriter, r *http.Request) {
 	trace := httpx.TraceID(r.Context())
 	n := testCount(r, 30, 100) // CAP KERAS: maks 100
 	base := pickOrderUpstream()
+	// PENTING (pelajaran metrik): error dikirim dalam 3 GELOMBANG berjarak
+	// ±7 detik, BUKAN sekaligus. Counter Prometheus yang "lahir" sudah
+	// bernilai penuh di antara dua scrape akan terbaca increase()=0 oleh
+	// alert (buta terhadap lonjakan sekejap) — dengan gelombang, tiap
+	// kenaikan bertahap tertangkap scrape & increase terbaca benar.
 	jadi := 0
-	for i := 0; i < n; i++ {
-		if code, _ := callInternal(r, "GET", base+"/simulate/error", "", nil); code == 500 {
-			jadi++
+	perWave := (n + 2) / 3
+	for wave := 0; wave < 3 && jadi < n; wave++ {
+		if wave > 0 {
+			time.Sleep(7 * time.Second)
+		}
+		for i := 0; i < perWave && jadi < n; i++ {
+			if code, _ := callInternal(r, "GET", base+"/simulate/error", "", nil); code == 500 {
+				jadi++
+			}
 		}
 	}
 	httpx.WriteJSON(w, 200, map[string]any{
