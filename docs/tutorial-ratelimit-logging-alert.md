@@ -301,8 +301,8 @@ Di FE1 (semua env) ada panel **J. Uji Alert & Beban**. Statusnya diperiksa otoma
 
 | Tombol (endpoint) | Yang terjadi | Alert yang ditargetkan |
 |---|---|---|
-| Spike Error 500 — `POST /api/test/spike-errors {count}` (default 30, **maks 100**) | Gateway menembak `/simulate/error` order-service `count` kali → metrik 5xx menumpuk | **ErrorRateHigh** |
-| Spike 429 — `POST /api/test/spike-429 {count}` (default 40, **maks 60**) | Gateway menembak `/api/limited-ping` dari **IP uji khusus** `198.51.100.77` (TEST-NET) melewati limit 10/menit → tumpukan 429. IP kamu sendiri tidak ikut terbakar kuotanya | **RateLimitSpike** |
+| Spike Error 500 — `POST /api/test/spike-errors {count}` (default 30, **maks 100**) | Gateway menembak `/simulate/error` order-service `count` kali **dalam 3 gelombang berjarak ±7 detik** (alasannya di catatan metrik bawah) → metrik 5xx menumpuk bertahap | **ErrorRateHigh** |
+| Spike 429 — `POST /api/test/spike-429 {count}` (default 40, **maks 60**) | Gateway menembak `/api/limited-ping` dari **IP uji khusus** `198.51.100.77` (TEST-NET) melewati limit 10/menit → tumpukan 429, dikirim dalam **4 gelombang** (alasan metrik yang sama). IP kamu sendiri tidak ikut terbakar kuotanya | **RateLimitSpike** |
 | Beban CPU — `POST /api/test/load-cpu {seconds}` (default 15, **maks 30 detik**) | Order-service membakar CPU terbatas (lihat batas aman di bawah) | **ContainerCpuHigh** + panel CPU dashboard |
 | Spam Sukses — `POST /api/test/spam-ok {count}` (default 100, **maks 200**) | Request 200 cepat beruntun ke endpoint ringan | *Tidak ada* — pembanding visual: trafik naik, error tetap hijau |
 
@@ -322,7 +322,17 @@ T+±7:00 kondisi tak lagi terpenuhi → alert RESOLVED → Telegram menerima pes
 
 Angka persisnya bisa bergeser 1–2 menit (interval evaluasi 1 menit), itu normal.
 
+**Hasil pengukuran nyata di VPS ini (23 Okt 2026, env dev):**
+
+| Uji | Tombol ditekan | Pending | FIRING | RESOLVED | Total siklus |
+|---|---|---|---|---|---|
+| Spike error 500 (30x) | 15:44:45 | 15:45:19 | **15:46:19** | **15:50:20** | ±5,5 menit |
+| Spike 429 (40x) | 16:04:21 | 16:05:20 | **16:06:20** | **16:11:01** | ±6,5 menit |
+| Beban CPU 20 detik | 15:55:41 | — | CPU container naik ke **47%** (batas 0,5 core bekerja); alert CPU tidak firing untuk burn sependek ini — memang di luar desain ambangnya (jendela 1 menit + `for` 1 menit), fungsi tombol ini adalah melihat grafik & membuktikan batas aman bekerja | — | load host hanya naik 0,88 → 1,63 |
+
 **Firing vs resolved**: *firing* = masalah sedang terjadi dan kamu sedang diberi tahu. *Resolved* = kondisi sudah kembali di bawah ambang; Grafana mengirim notifikasi penutupnya juga. Alert yang firing lalu resolved sendiri setelah uji adalah bukti rantai sehat — alert yang **tidak pernah resolved** berarti masalahnya masih berlangsung.
+
+> **Catatan metrik penting (ditemukan saat pengujian perdana)**: spike error pertama kami kirim sekaligus dalam <1 detik — dan alert **tidak menyala**. Penyebabnya halus: Prometheus men-scrape tiap ±15 detik, dan counter `http_requests_total` untuk seri baru itu "lahir" sudah bernilai 30 pada scrape pertama, sehingga fungsi `increase()` membaca **0** (tidak ada kenaikan *di antara* sampel). Pelajarannya berlaku umum: `increase()`/`rate()` buta terhadap lonjakan yang selesai di antara dua scrape. Karena itu spike-errors dikirim **bergelombang** — dan di sistem produksi, inilah alasan alert berbasis error biasanya dipasangkan dengan ambang pada jendela yang lebih panjang atau pencatatan di sisi klien/log.
 
 ### Batas aman (HARD LIMITS — sengaja dikunci di kode & konfigurasi)
 
