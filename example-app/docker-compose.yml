@@ -119,9 +119,13 @@ services:
       replicas: ${ORDER_REPLICAS:-1}
       resources:
         limits:
+          memory: 96m
           # Batas CPU container order-service. Default 2 = nyaris tanpa batas
           # di host 2 vCPU; env dev mengisi 0.5 agar uji beban CPU (chaos
           # test) tidak pernah mengganggu host & aplikasi lain.
+          # CATATAN: mem_limit top-level tidak boleh berdampingan dengan
+          # deploy.resources.limits (compose menolaknya) — batas memori
+          # order-service karena itu tinggal di blok ini.
           cpus: "${ORDER_CPUS:-2}"
     environment:
       SERVICE_NAME: order-service
@@ -136,7 +140,6 @@ services:
       - postgres
       - rabbitmq
       - redis
-    mem_limit: 96m
     networks:
       example-net:
         aliases:
