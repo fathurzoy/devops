@@ -3,3 +3,7 @@
 !.env.example
 !example-app/env/
 !example-app/env/*.env
+
+# Secret Telegram Grafana (dibuat di server dari .env — JANGAN commit)
+platform/grafana/secrets/telegram_bot_token
+platform/grafana/secrets/telegram_chat_id
