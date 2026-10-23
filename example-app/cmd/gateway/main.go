@@ -348,13 +348,27 @@ func testSpike429(w http.ResponseWriter, r *http.Request) {
 	trace := httpx.TraceID(r.Context())
 	n := testCount(r, 40, 60) // CAP KERAS: maks 60
 	port := httpx.Env("PORT", "8080")
+	// Sama seperti spike-errors: dikirim BERGELOMBANG (4 gelombang, jeda
+	// ±6 detik) agar kenaikan counter 429 tertangkap beberapa scrape
+	// Prometheus — lonjakan sekejap terbaca increase()=0. Empat gelombang
+	// juga membuat total 429 tetap di atas ambang alert walau jendela
+	// fixed-window 60 detik bergeser di tengah pengujian.
 	lolos, ditolak := 0, 0
-	for i := 0; i < n; i++ {
-		code, _ := callInternal(r, "GET", "http://127.0.0.1:"+port+"/api/limited-ping", testIP, nil)
-		if code == 200 {
-			lolos++
-		} else if code == 429 {
-			ditolak++
+	const waves = 4
+	perWave := (n + waves - 1) / waves
+	terkirim := 0
+	for wave := 0; wave < waves && terkirim < n; wave++ {
+		if wave > 0 {
+			time.Sleep(6 * time.Second)
+		}
+		for i := 0; i < perWave && terkirim < n; i++ {
+			code, _ := callInternal(r, "GET", "http://127.0.0.1:"+port+"/api/limited-ping", testIP, nil)
+			terkirim++
+			if code == 200 {
+				lolos++
+			} else if code == 429 {
+				ditolak++
+			}
 		}
 	}
 	httpx.WriteJSON(w, 200, map[string]any{
