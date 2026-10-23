@@ -139,6 +139,22 @@ ul.feed{list-style:none;padding:0;margin:6px 0} ul.feed li{border-bottom:1px sol
 <div id="rlOut" style="margin-top:8px"></div>
 <p class="note">Perhatikan: 10 request pertama lolos (200), sisanya 429 sampai jendela 60 detik berganti. Karena hitungan disimpan di Redis, limit ini tetap akurat walau gateway punya banyak replica.</p></section>
 
+<section><h2>J. Uji Alert &amp; Beban — Chaos Test (KHUSUS DEV)</h2>
+<p class="note">Tombol-tombol ini <b>sengaja membuat masalah terkendali</b> agar kamu bisa membuktikan rantai penjagaan bekerja: lonjakan terjadi &rarr; panel Grafana memerah &rarr; alert <b>firing</b> &rarr; notifikasi masuk Telegram &rarr; lonjakan berhenti &rarr; alert <b>resolved</b> sendiri &amp; Telegram menerima pesan pulih. Endpoint penguji (<code>/api/test/*</code>) dikecualikan dari rate limit, tetapi tetap tercatat di log dengan <code>test=true</code>.</p>
+<div id="testGate" class="note">Memeriksa apakah endpoint penguji aktif di env ini...</div>
+<div id="testBtns" style="display:none">
+<button class="danger" onclick="runTest('spike-errors',{count:30})">Spike Error 500 (30x)</button>
+<span class="small">Target: alert <b>ErrorRateHigh</b> (error 5xx &gt; 10 dalam 5 menit) — Telegram bunyi dalam ±1–3 menit.</span><br>
+<button class="danger" onclick="runTest('spike-429',{count:40})">Spike 429 (40x dari IP uji)</button>
+<span class="small">Target: alert <b>RateLimitSpike</b> (429 &gt; 20 dalam 5 menit) — memakai IP uji khusus, kuota IP kamu tidak terbakar.</span><br>
+<button class="alt" onclick="runTest('load-cpu',{seconds:20})">Beban CPU 20 Detik (terbatas!)</button>
+<span class="small">Target: panel CPU dashboard naik &amp; alert <b>ContainerCpuHigh</b>. Sangat dibatasi: maks 30 detik, pola duty-cycle, kunci Redis satu-satuan, container dev dibatasi 0,5 CPU — TIDAK akan mematikan server.</span><br>
+<button onclick="runTest('spam-ok',{count:100})">Spam Request Sukses (100x)</button>
+<span class="small">Pembanding visual: grafik trafik naik, panel error tetap hijau, tidak ada alert. Maks 200.</span>
+</div>
+<div id="testOut" style="margin-top:8px"></div>
+<p class="note"><b>Peringatan:</b> fasilitas seperti ini di produksi beneran wajib <b>dimatikan</b> (di sini dikendalikan env <code>ENABLE_TEST_ENDPOINTS</code>; prod &amp; staging selalu <code>false</code> &rarr; endpoint membalas 404 dan panel ini nonaktif).</p></section>
+
 <section><h2>Panel Output</h2><pre id="out">// Hasil request terakhir tampil di sini (JSON + status + durasi + trace_id)</pre></section>
 </main>
 <script>
@@ -307,6 +323,31 @@ async function spamLimited(){
   show('Spam Limited 15x', n429 ? 429 : 200, Math.round(performance.now()-t0), lastTrace,
     'Ringkasan: ' + n200 + ' lolos, ' + n429 + ' ditolak rate limiter. Cari log-nya di Loki: {container=~"example-.+"} | json | status = 429 — lengkap dengan client_ip penembaknya.');
 }
+async function checkTestStatus(){
+  try{
+    var res = await fetch(GW + '/api/test/status');
+    var d = await res.json();
+    if(d.enabled){
+      document.getElementById('testGate').innerHTML = 'Status endpoint penguji: <b>AKTIF</b> di env <b>' + d.env + '</b> — tombol uji di bawah bisa dipakai.';
+      document.getElementById('testBtns').style.display = 'block';
+    }else{
+      document.getElementById('testGate').innerHTML = 'Status endpoint penguji: <b>NONAKTIF</b> di env <b>' + d.env + '</b>. Chaos test hanya diizinkan di env <b>development</b> — buka FE env dev untuk memakai tombol-tombol ini.';
+    }
+  }catch(e){
+    document.getElementById('testGate').textContent = 'Tidak bisa memeriksa status endpoint penguji: ' + e;
+  }
+}
+async function runTest(kind, body){
+  var t0 = performance.now();
+  try{
+    var res = await fetch(GW + '/api/test/' + kind, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    var d = await res.json();
+    document.getElementById('testOut').innerHTML = '<pre>' + JSON.stringify(d, null, 2) + '</pre>' +
+      '<p class="note">Sekarang buka dashboard Pusat Kendali Example App di Grafana dan saksikan panelnya memerah; alert yang sesuai akan firing dan Telegram berbunyi dalam perkiraan waktu di atas. Setelah lonjakan berhenti, alert resolved sendiri.</p>';
+    show('Uji ' + kind, res.status, Math.round(performance.now()-t0), d.trace_id, d);
+    return d;
+  }catch(e){ show('Uji ' + kind,'ERROR',0,'',String(e)); }
+}
 async function loadEnvInfo(){
   try{
     var res = await fetch(GW + '/api/health/all');
@@ -315,6 +356,6 @@ async function loadEnvInfo(){
     if(gw) document.getElementById('envInfo').textContent = gw.env + ' | versi gateway ' + gw.version;
   }catch(e){}
 }
-refreshOrders(false); refreshInbox(false); refreshSched(false); loadEnvInfo(); loadWhoami(false);
+refreshOrders(false); refreshInbox(false); refreshSched(false); loadEnvInfo(); loadWhoami(false); checkTestStatus();
 setInterval(refreshOrders, 5000); setInterval(refreshInbox, 4000); setInterval(refreshSched, 5000);
 </script></body></html>`

@@ -91,6 +91,7 @@ type ReqInfo struct {
 	Endpoint    string // override label endpoint metrik (mis. "/api/users")
 	ErrorKind   string // mis. downstream_timeout, db_error, panic_recovered
 	RateLimited bool
+	Test        bool // request bagian dari uji/chaos test (header X-Test: 1) — terlihat di log untuk audit
 }
 
 // ReqInfoFrom mengambil ReqInfo dari context (nil bila bukan dari Middleware).
@@ -258,7 +259,7 @@ func Middleware(next http.Handler) http.Handler {
 			trace = NewTraceID()
 		}
 		w.Header().Set("X-Trace-Id", trace)
-		info := &ReqInfo{ClientIP: ClientIP(r), UserID: r.Header.Get("X-User-Id")}
+		info := &ReqInfo{ClientIP: ClientIP(r), UserID: r.Header.Get("X-User-Id"), Test: r.Header.Get("X-Test") == "1"}
 		ctx := context.WithValue(r.Context(), ctxKey{}, trace)
 		ctx = context.WithValue(ctx, reqInfoKey{}, info)
 		start := time.Now()
@@ -311,6 +312,9 @@ func Middleware(next http.Handler) http.Handler {
 		if info.RateLimited {
 			kv = append(kv, "rate_limited", true)
 		}
+		if info.Test {
+			kv = append(kv, "test", true)
+		}
 		msg := "request selesai"
 		if status >= 400 {
 			kv = append(kv, "error", http.StatusText(status))
@@ -357,6 +361,9 @@ func NewRequest(ctx context.Context, method, url string, body *strings.Reader) (
 		}
 		if info.UserID != "" {
 			req.Header.Set("X-User-Id", info.UserID)
+		}
+		if info.Test {
+			req.Header.Set("X-Test", "1")
 		}
 	}
 	return req, nil

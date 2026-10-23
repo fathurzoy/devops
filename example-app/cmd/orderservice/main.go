@@ -15,12 +15,14 @@ import (
 
 	"exampleapp/internal/httpx"
 	"exampleapp/internal/mqx"
+	"exampleapp/internal/redisx"
 )
 
 var (
-	db     *sql.DB
-	pub    *mqx.Publisher
-	userURL string
+	db       *sql.DB
+	pub      *mqx.Publisher
+	userURL  string
+	redisCli *redisx.Client
 )
 
 type Order struct {
@@ -36,6 +38,7 @@ type Order struct {
 func main() {
 	httpx.ServiceName = httpx.Env("SERVICE_NAME", "order-service")
 	userURL = httpx.Env("USER_SERVICE_URL", "http://example-user-service:8080")
+	redisCli = &redisx.Client{Addr: httpx.Env("REDIS_ADDR", "redis:6379")}
 	pub = &mqx.Publisher{URL: httpx.Env("RABBITMQ_URL", "")}
 	var err error
 	db, err = sql.Open("postgres", httpx.Env("DATABASE_URL", ""))
@@ -71,6 +74,7 @@ func main() {
 	mux.HandleFunc("GET /simulate/slow", simSlow)
 	mux.HandleFunc("GET /whoami", whoami)
 	mux.HandleFunc("POST /jobs/cleanup-demo", jobCleanupDemo)
+	mux.HandleFunc("POST /jobs/burn-cpu", jobBurnCPU)
 	port := httpx.Env("PORT", "8080")
 	httpx.Log("info", "", "listen :"+port)
 	if err := http.ListenAndServe(":"+port, httpx.Middleware(mux)); err != nil {
@@ -240,6 +244,58 @@ func jobCleanupDemo(w http.ResponseWriter, r *http.Request) {
 		"replica": httpx.Hostname(), "version": httpx.AppVersion, "env": httpx.EnvName,
 		"trace_id": trace, "finished_at": time.Now().UTC().Format(time.RFC3339),
 		"ringkasan": "membersihkan data demo kedaluwarsa (simulasi)",
+	})
+}
+
+// jobBurnCPU: endpoint internal untuk UJI BEBAN CPU yang SANGAT dibatasi
+// (dipanggil gateway lewat /api/test/load-cpu, hanya aktif di env dev):
+//   - durasi maks 30 detik, berhenti sendiri (auto-stop);
+//   - pola duty-cycle: sibuk 50ms lalu tidur 50ms — tidak memonopoli CPU;
+//   - kunci Redis "burncpu:lock" memastikan hanya SATU burn berjalan pada
+//     satu waktu di seluruh replica; tanpa lock, endpoint menolak bekerja.
+// Container order-service dev juga dibatasi cpus 0.5 di Compose, jadi beban
+// maksimumnya setengah core — host (2 vCPU) dan aplikasi lain tidak terganggu.
+func jobBurnCPU(w http.ResponseWriter, r *http.Request) {
+	trace := httpx.TraceID(r.Context())
+	var in struct {
+		Seconds int `json:"seconds"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	if in.Seconds <= 0 {
+		in.Seconds = 15
+	}
+	if in.Seconds > 30 {
+		in.Seconds = 30
+	}
+	ok, err := redisCli.SetNX("burncpu:lock", trace, in.Seconds+15)
+	if err != nil {
+		httpx.WriteJSON(w, 503, map[string]any{"error": "Redis tidak terjangkau — burn CPU dibatalkan demi keamanan (tanpa lock tidak jalan)", "trace_id": trace})
+		return
+	}
+	if !ok {
+		httpx.WriteJSON(w, 409, map[string]any{"error": "sedang ada burn CPU yang berjalan (lock terpegang) — tunggu sampai selesai", "trace_id": trace})
+		return
+	}
+	secs := in.Seconds
+	go func() {
+		defer func() { _ = redisCli.Del("burncpu:lock") }()
+		httpx.Log("warn", trace, "BURN CPU mulai (uji beban terbatas)", "seconds", secs, "replica", httpx.Hostname(), "test", true)
+		deadline := time.Now().Add(time.Duration(secs) * time.Second)
+		for time.Now().Before(deadline) {
+			spinUntil := time.Now().Add(50 * time.Millisecond)
+			x := 0
+			for time.Now().Before(spinUntil) {
+				x++
+			}
+			_ = x
+			time.Sleep(50 * time.Millisecond)
+		}
+		httpx.Log("info", trace, "BURN CPU selesai (auto-stop)", "seconds", secs, "replica", httpx.Hostname(), "test", true)
+	}()
+	httpx.WriteJSON(w, 202, map[string]any{
+		"status": "dimulai", "seconds": secs, "pola": "duty-cycle 50ms sibuk / 50ms tidur, 1 goroutine",
+		"replica": httpx.Hostname(), "env": httpx.EnvName, "trace_id": trace,
+		"catatan": "Burn berhenti sendiri setelah durasi habis; lock Redis mencegah burn ganda.",
 	})
 }
 

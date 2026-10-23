@@ -588,6 +588,15 @@ dengan Jenkins: **`tutorial-deploy-cicd.md`**.
 ~/devops-platform/      Portainer/Grafana/Prometheus/Loki
 ```
 
+### 16.7 Penjagaan: rate limit, logging forensik & alert Telegram
+
+Setelah sistem jalan, lapisan penjagaan ditambahkan (dokumen pendamping: **`tutorial-ratelimit-logging-alert.md`** — baca itu untuk versi lengkapnya). Ringkasnya:
+
+- **Rate limit di gateway** per client IP, dihitung di Redis (fixed window 60 detik): semua `/api/*` maks 600/menit/IP, endpoint demo `/api/limited-ping` 10/menit/IP. Kelebihan dibalas **429 + `Retry-After`** dan tercatat sebagai log `warn` ber-field `rate_limited: true` serta metrik `status="429"`. Di FE ada panel **I. Rate Limit & Keamanan** (tombol whoami & spam 15x) untuk merasakannya sendiri.
+- **Log dimaksimalkan untuk forensik**: tiap request kini mencatat `client_ip`, `user_id`, `user_agent`, `error_kind`, ukuran request/respons, dan versi service — ditambah *panic recovery* agar crash tercatat ber-`trace_id`. Skenario andalannya: "user bilang error jam segini" → saring Loki per rentang waktu + `status >= 500` → ambil `trace_id` → telusuri semua service (langkah persisnya di tutorial pendamping).
+- **Alert Telegram dari Grafana Alerting** (provisioning di `platform/grafana/provisioning/alerting/`): ErrorRateHigh, RateLimitSpike, ServiceDown, HostDiskHigh → contact point `telegram`. Bot token & chat ID hidup di `.env` platform (diisi manual di server, tidak masuk Git).
+- **Dashboard baru "Pusat Kendali Example App"** (provisioning, folder Example App di Grafana): filter `$env`/`$service`, stat ringkasan, tabel-tabel terurut terbesar → terkecil (container terboros CPU/RAM, endpoint teramai, service error terbanyak, IP teramai dari Loki) — menjawab pertanyaan operasional tanpa menulis query.
+
 ---
 
 *Dokumen ini adalah catatan hidup dari sistem yang benar-benar terpasang. Kalau ada yang berubah di server (tambah service, ganti port), perbarui dokumen ini supaya tetap jadi sumber kebenaran.*

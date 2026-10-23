@@ -1,0 +1,14 @@
+# Provisioning dashboard: semua file .json di folder yang sama dengan file ini
+# otomatis dimuat Grafana sebagai dashboard (folder "Example App").
+# Dashboard lama yang dulu diimpor lewat API/UI tidak terpengaruh provider ini.
+apiVersion: 1
+providers:
+  - name: Example App
+    orgId: 1
+    folder: Example App
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards

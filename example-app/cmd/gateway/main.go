@@ -27,6 +27,7 @@ var (
 	orderUpstreams              atomic.Value // []string
 	rrCounter                   atomic.Uint64
 	rateRedis                   *redisx.Client
+	testEnabled                 bool // ENABLE_TEST_ENDPOINTS — chaos test, HANYA true di env dev
 	proxyClient                 = &http.Client{
 		Timeout: 20 * time.Second,
 		Transport: &http.Transport{
@@ -72,6 +73,7 @@ func main() {
 	notifURL = httpx.Env("NOTIFICATION_SERVICE_URL", "http://notification-service:8080")
 	schedURL = httpx.Env("SCHEDULER_SERVICE_URL", "http://scheduler-service:8080")
 	adminToken = httpx.Env("GATEWAY_ADMIN_TOKEN", "")
+	testEnabled = httpx.Env("ENABLE_TEST_ENDPOINTS", "false") == "true"
 	rateRedis = &redisx.Client{Addr: httpx.Env("REDIS_ADDR", "redis:6379")}
 	if ups := parseUpstreams(httpx.Env("ORDER_UPSTREAMS", "http://order-service:8080")); len(ups) > 0 {
 		setUpstreams(ups)
@@ -106,6 +108,13 @@ const (
 func rateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Endpoint penguji/chaos (/api/test/*) DIKECUALIKAN dari rate limit:
+		// tugasnya memang menguji penjagaan & alert. Ia tetap tercatat di log
+		// (field test=true) dan metrik, jadi pemakaiannya bisa diaudit.
+		if strings.HasPrefix(r.URL.Path, "/api/test/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -157,6 +166,8 @@ func route(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	p := r.URL.Path
 	switch {
+	case strings.HasPrefix(p, "/api/test/"):
+		testRoute(w, r)
 	case p == "/api/health/all":
 		httpx.SetEndpoint(ctx, "/api/health/all")
 		healthAll(w, r)
@@ -205,6 +216,190 @@ func route(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, 404, map[string]any{"error": "route tidak dikenal: " + p, "trace_id": trace,
 			"routes": []string{"/api/health/all", "/api/users", "/api/orders", "/api/cache", "/api/simulate/*", "/api/notifications", "/api/events", "/api/rabbitmq/publish", "/api/scheduler/status", "/api/scheduler/run-now", "/api/orders/whoami", "/api/ha/check", "/api/whoami", "/api/limited-ping"}})
 	}
+}
+
+// --- Endpoint penguji / chaos test (/api/test/*) ---
+//
+// Fasilitas UJI yang disengaja: membuat lonjakan error/429/trafik/CPU agar
+// alert Grafana & Telegram terbukti bekerja. BATAS AMAN yang mengikat:
+//   - Hanya aktif bila ENABLE_TEST_ENDPOINTS=true (di setup ini: HANYA dev).
+//     Di env lain semua endpoint ini membalas 404.
+//   - Dikecualikan dari rate limit (allowlist di middleware rateLimit),
+//     tetapi tetap tercatat di log dengan field test=true + di metrik.
+//   - Semua count/durasi di-CAP keras di kode (lihat tiap handler).
+//   - Beban CPU sangat terbatas: maks 30 detik, duty-cycle, kunci Redis,
+//     dan container order-service dev dibatasi cpus 0.5 di Compose.
+// PERINGATAN: endpoint seperti ini TIDAK BOLEH aktif di produksi beneran
+// tanpa perlindungan (token/auth) — matikan lewat ENABLE_TEST_ENDPOINTS=false.
+
+var testClient = &http.Client{Timeout: 10 * time.Second}
+
+// testIP adalah IP dokumentasi TEST-NET-2 (RFC 5737) yang dipakai sebagai
+// "IP penyerang" pada spike-429, agar kuota rate limit IP user asli tidak
+// ikut terbakar dan log mudah dikenali sebagai uji.
+const testIP = "198.51.100.77"
+
+func testRoute(w http.ResponseWriter, r *http.Request) {
+	trace := httpx.TraceID(r.Context())
+	p := r.URL.Path
+	httpx.SetEndpoint(r.Context(), p)
+	if p == "/api/test/status" {
+		httpx.WriteJSON(w, 200, map[string]any{"enabled": testEnabled, "env": httpx.EnvName, "version": httpx.AppVersion,
+			"trace_id": trace, "catatan": "Endpoint penguji hanya aktif di env development (ENABLE_TEST_ENDPOINTS=true)."})
+		return
+	}
+	if !testEnabled {
+		httpx.WriteJSON(w, 404, map[string]any{"error": "endpoint penguji nonaktif di env ini — chaos test hanya boleh di development", "trace_id": trace})
+		return
+	}
+	switch p {
+	case "/api/test/spike-errors":
+		testSpikeErrors(w, r)
+	case "/api/test/spike-429":
+		testSpike429(w, r)
+	case "/api/test/load-cpu":
+		testLoadCPU(w, r)
+	case "/api/test/spam-ok":
+		testSpamOK(w, r)
+	default:
+		httpx.WriteJSON(w, 404, map[string]any{"error": "endpoint penguji tidak dikenal: " + p, "trace_id": trace,
+			"tersedia": []string{"/api/test/status", "/api/test/spike-errors", "/api/test/spike-429", "/api/test/load-cpu", "/api/test/spam-ok"}})
+	}
+}
+
+// callInternal menembak satu request internal bertanda X-Test (dan trace_id
+// yang sama dengan request penguji) lalu mengembalikan status HTTP-nya.
+func callInternal(r *http.Request, method, url, xff string, body []byte) (int, []byte) {
+	var rd io.Reader
+	if body != nil {
+		rd = strings.NewReader(string(body))
+	}
+	req, err := http.NewRequestWithContext(r.Context(), method, url, rd)
+	if err != nil {
+		return 0, nil
+	}
+	req.Header.Set("X-Test", "1")
+	if t := httpx.TraceID(r.Context()); t != "" {
+		req.Header.Set("X-Trace-Id", t)
+	}
+	if xff != "" {
+		req.Header.Set("X-Forwarded-For", xff)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := testClient.Do(req)
+	if err != nil {
+		return 0, nil
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	return resp.StatusCode, out
+}
+
+func testCount(r *http.Request, def, capMax int) int {
+	var in struct {
+		Count int `json:"count"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+	if len(body) > 0 {
+		_ = json.Unmarshal(body, &in)
+	}
+	if in.Count <= 0 {
+		return def
+	}
+	if in.Count > capMax {
+		return capMax
+	}
+	return in.Count
+}
+
+func testSpikeErrors(w http.ResponseWriter, r *http.Request) {
+	trace := httpx.TraceID(r.Context())
+	n := testCount(r, 30, 100) // CAP KERAS: maks 100
+	base := pickOrderUpstream()
+	jadi := 0
+	for i := 0; i < n; i++ {
+		if code, _ := callInternal(r, "GET", base+"/simulate/error", "", nil); code == 500 {
+			jadi++
+		}
+	}
+	httpx.WriteJSON(w, 200, map[string]any{
+		"dibuat": jadi, "diminta": n, "jenis": "error 500 dari order-service (/simulate/error)",
+		"target_alert":        "ErrorRateHigh — error 5xx > 10 dalam 5 menit",
+		"perkiraan_menit_sampai_alert": "±1-3 menit (evaluasi rule tiap 1 menit + for 1 menit + jeda notifikasi)",
+		"setelah_berhenti":             "lonjakan keluar dari jendela 5 menit → alert resolved sendiri & Telegram menerima pesan pulih",
+		"trace_id":                     trace,
+	})
+}
+
+func testSpike429(w http.ResponseWriter, r *http.Request) {
+	trace := httpx.TraceID(r.Context())
+	n := testCount(r, 40, 60) // CAP KERAS: maks 60
+	port := httpx.Env("PORT", "8080")
+	lolos, ditolak := 0, 0
+	for i := 0; i < n; i++ {
+		code, _ := callInternal(r, "GET", "http://127.0.0.1:"+port+"/api/limited-ping", testIP, nil)
+		if code == 200 {
+			lolos++
+		} else if code == 429 {
+			ditolak++
+		}
+	}
+	httpx.WriteJSON(w, 200, map[string]any{
+		"dibuat": n, "lolos_200": lolos, "ditolak_429": ditolak, "ip_uji": testIP,
+		"jenis":                "menembak /api/limited-ping dari IP uji sampai melewati limit 10/menit",
+		"target_alert":         "RateLimitSpike — 429 > 20 dalam 5 menit",
+		"perkiraan_menit_sampai_alert": "±1-3 menit",
+		"setelah_berhenti":             "jendela 60 detik berganti & hitungan 5 menit meluruh → alert resolved sendiri",
+		"trace_id":                     trace,
+	})
+}
+
+func testLoadCPU(w http.ResponseWriter, r *http.Request) {
+	trace := httpx.TraceID(r.Context())
+	var in struct {
+		Seconds int `json:"seconds"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+	if len(body) > 0 {
+		_ = json.Unmarshal(body, &in)
+	}
+	if in.Seconds <= 0 {
+		in.Seconds = 15
+	}
+	if in.Seconds > 30 {
+		in.Seconds = 30 // CAP KERAS: maks 30 detik
+	}
+	payload, _ := json.Marshal(map[string]any{"seconds": in.Seconds})
+	code, out := callInternal(r, "POST", pickOrderUpstream()+"/jobs/burn-cpu", "", payload)
+	var detail map[string]any
+	_ = json.Unmarshal(out, &detail)
+	httpx.WriteJSON(w, 200, map[string]any{
+		"dibuat": "burn CPU " + strconv.Itoa(in.Seconds) + " detik di order-service (duty-cycle, terkunci Redis, auto-stop)",
+		"status_order_service": code, "detail": detail,
+		"target_alert":                 "ContainerCpuHigh (CPU container order-service) — dan panel CPU dashboard naik; host dibatasi cpus 0.5 khusus dev",
+		"perkiraan_menit_sampai_alert": "±2-4 menit bila ambang terlampaui selama durasi burn",
+		"trace_id":                     trace,
+	})
+}
+
+func testSpamOK(w http.ResponseWriter, r *http.Request) {
+	trace := httpx.TraceID(r.Context())
+	n := testCount(r, 100, 200) // CAP KERAS: maks 200
+	port := httpx.Env("PORT", "8080")
+	ok := 0
+	for i := 0; i < n; i++ {
+		if code, _ := callInternal(r, "GET", "http://127.0.0.1:"+port+"/api/whoami", "", nil); code == 200 {
+			ok++
+		}
+	}
+	httpx.WriteJSON(w, 200, map[string]any{
+		"dibuat": ok, "diminta": n, "jenis": "request SUKSES cepat ke /api/whoami (tanpa error)",
+		"target_alert":                 "tidak ada — ini pembanding visual: grafik trafik naik, panel error tetap hijau",
+		"perkiraan_menit_sampai_alert": "-",
+		"trace_id":                     trace,
+	})
 }
 
 // whoami: memperlihatkan identitas yang dilihat & dicatat server tentang

@@ -1,0 +1,21 @@
+# Contact point Telegram untuk Grafana Alerting.
+# Token bot & chat ID TIDAK ditulis di file ini — dibaca dari environment
+# Grafana (TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID di file .env platform,
+# diteruskan ke container lewat docker-compose). User mengisi sendiri
+# kedua nilai itu di server; selama masih kosong, contact point tetap
+# ter-provision tetapi pengiriman pesan akan gagal — isi .env lalu
+# restart Grafana untuk menguji (tombol Test di Settings > Contact points).
+# Cara mendapatkan token & chat ID: lihat docs/tutorial-ratelimit-logging-alert.md
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: telegram
+    receivers:
+      - uid: telegram-utama
+        type: telegram
+        disableResolveMessage: false
+        settings:
+          chatid: $__env{TELEGRAM_CHAT_ID}
+          parse_mode: None
+        secureSettings:
+          bottoken: $__env{TELEGRAM_BOT_TOKEN}

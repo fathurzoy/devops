@@ -71,6 +71,7 @@ services:
       ORDER_UPSTREAMS: ${ORDER_UPSTREAMS:-http://${NAME_PREFIX:-example-}order-service:8080}
       GATEWAY_ADMIN_TOKEN: ${GATEWAY_ADMIN_TOKEN:-}
       REDIS_ADDR: redis:6379
+      ENABLE_TEST_ENDPOINTS: ${ENABLE_TEST_ENDPOINTS:-false}
       PORT: "8080"
     depends_on:
       - redis
@@ -116,6 +117,12 @@ services:
     restart: unless-stopped
     deploy:
       replicas: ${ORDER_REPLICAS:-1}
+      resources:
+        limits:
+          # Batas CPU container order-service. Default 2 = nyaris tanpa batas
+          # di host 2 vCPU; env dev mengisi 0.5 agar uji beban CPU (chaos
+          # test) tidak pernah mengganggu host & aplikasi lain.
+          cpus: "${ORDER_CPUS:-2}"
     environment:
       SERVICE_NAME: order-service
       ENV_NAME: ${ENV_NAME:-production}
@@ -123,10 +130,12 @@ services:
       DATABASE_URL: postgres://example:${POSTGRES_PASSWORD}@postgres:5432/exampledb?sslmode=disable
       USER_SERVICE_URL: http://${NAME_PREFIX:-example-}user-service:8080
       RABBITMQ_URL: amqp://example:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      REDIS_ADDR: redis:6379
       PORT: "8080"
     depends_on:
       - postgres
       - rabbitmq
+      - redis
     mem_limit: 96m
     networks:
       example-net:

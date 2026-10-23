@@ -1,0 +1,350 @@
+# Alert rules untuk Example App + host VPS.
+# Semua query memakai datasource Prometheus (uid: PBFA97CFB590B2093) dan menghasilkan
+# satu instance alert per nilai label env (production/staging/development),
+# kecuali ServiceDown (per instance target) dan HostDiskHigh (per host).
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: Example App — Error, Rate Limit, Ketersediaan, Disk
+    folder: Example App
+    interval: 1m
+    rules:
+      - uid: example-error-rate-high
+        title: Error 5xx Example App Tinggi
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              datasource:
+                type: prometheus
+                uid: PBFA97CFB590B2093
+              editorMode: code
+              expr: sum by (env) (increase(http_requests_total{status=~"5.."}[5m]))
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              refId: B
+              type: reduce
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 10
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        annotations:
+          summary: "Error 5xx tinggi di env {{ $labels.env }}"
+          description: "Lebih dari 10 error 5xx dalam 5 menit di env {{ $labels.env }} (bertahan 1 menit). Langkah cek: buka Grafana > Explore > Loki, saring status>=500 dan ikuti trace_id yang paling sering muncul; periksa juga panel Service dengan Error Terbanyak di dashboard Pusat Kendali Example App. Bila sumbernya uji chaos (log bertanda test=true), ini memang disengaja."
+        labels:
+          severity: warning
+          team: example-app
+        isPaused: false
+
+      - uid: example-rate-limit-spike
+        title: Lonjakan Rate Limit 429 Example App
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              datasource:
+                type: prometheus
+                uid: PBFA97CFB590B2093
+              editorMode: code
+              expr: sum by (env) (increase(http_requests_total{status="429"}[5m]))
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              refId: B
+              type: reduce
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 20
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        annotations:
+          summary: "Banyak request kena rate limit (429) di env {{ $labels.env }}"
+          description: "Lebih dari 20 request ditolak rate limiter dalam 5 menit di env {{ $labels.env }}. Bisa berarti ada klien yang spam/brute force, bisa juga limit terlalu ketat untuk trafik sah. Cek panel IP Paling Sering Hit di dashboard Pusat Kendali Example App, lalu telusuri client_ip tersebut di Loki."
+        labels:
+          severity: warning
+          team: example-app
+        isPaused: false
+
+      - uid: example-service-down
+        title: Service Example App Down
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              datasource:
+                type: prometheus
+                uid: PBFA97CFB590B2093
+              editorMode: code
+              expr: up{job=~"example|example-staging|example-dev"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              refId: B
+              type: reduce
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: "Service {{ $labels.instance }} (job {{ $labels.job }}) tidak terjangkau Prometheus"
+          description: "Target {{ $labels.instance }} pada job {{ $labels.job }} berstatus down lebih dari 2 menit. Cek container-nya di Portainer (restart count & log terakhir), atau jalankan docker ps di VPS untuk env {{ $labels.env }}."
+        labels:
+          severity: critical
+          team: example-app
+        isPaused: false
+
+      - uid: host-disk-high
+        title: Disk VPS Hampir Penuh
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              datasource:
+                type: prometheus
+                uid: PBFA97CFB590B2093
+              editorMode: code
+              expr: 100 * (1 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}))
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              refId: B
+              type: reduce
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 85
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: "Disk / VPS terpakai di atas 85%"
+          description: "Pemakaian disk root VPS melewati 85% selama lebih dari 5 menit. Kandidat terbesar biasanya log Loki & image Docker lama: cek df -h, docker system df, dan retensi Loki; bersihkan image tak terpakai dengan docker image prune (hati-hati, jangan hapus volume database)."
+        labels:
+          severity: warning
+          team: platform
+        isPaused: false
+
+      - uid: example-container-cpu-high
+        title: CPU Container Order-Service Tinggi
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              datasource:
+                type: prometheus
+                uid: PBFA97CFB590B2093
+              editorMode: code
+              expr: sum by (name) (rate(container_cpu_usage_seconds_total{name=~"example.*order-service.*"}[1m]))
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              refId: B
+              type: reduce
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.15
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        annotations:
+          summary: "CPU container {{ $labels.name }} tinggi"
+          description: "Container order-service {{ $labels.name }} memakai CPU di atas 0,15 core berkelanjutan. Di env dev ini bisa berasal dari uji beban CPU (chaos test, maks 30 detik & dibatasi 0,5 core); di env lain, anggap serius: cek panel Container Paling Boros CPU di dashboard Pusat Kendali Example App."
+        labels:
+          severity: warning
+          team: example-app
+        isPaused: false
