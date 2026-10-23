@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"exampleapp/internal/httpx"
+	"exampleapp/internal/redisx"
 )
 
 var (
@@ -25,6 +26,7 @@ var (
 	adminToken                  string
 	orderUpstreams              atomic.Value // []string
 	rrCounter                   atomic.Uint64
+	rateRedis                   *redisx.Client
 	proxyClient                 = &http.Client{
 		Timeout: 20 * time.Second,
 		Transport: &http.Transport{
@@ -70,6 +72,7 @@ func main() {
 	notifURL = httpx.Env("NOTIFICATION_SERVICE_URL", "http://notification-service:8080")
 	schedURL = httpx.Env("SCHEDULER_SERVICE_URL", "http://scheduler-service:8080")
 	adminToken = httpx.Env("GATEWAY_ADMIN_TOKEN", "")
+	rateRedis = &redisx.Client{Addr: httpx.Env("REDIS_ADDR", "redis:6379")}
 	if ups := parseUpstreams(httpx.Env("ORDER_UPSTREAMS", "http://order-service:8080")); len(ups) > 0 {
 		setUpstreams(ups)
 	}
@@ -80,18 +83,67 @@ func main() {
 	mux.HandleFunc("/admin/", adminRoute)
 	mux.HandleFunc("/", route)
 	port := httpx.Env("PORT", "8080")
-	httpx.Log("info", "", "api-gateway listen :"+port, "order_upstreams", strings.Join(getUpstreams(), ","))
-	if err := http.ListenAndServe(":"+port, cors(httpx.Middleware(mux))); err != nil {
+	httpx.Log("info", "", "api-gateway listen :"+port, "order_upstreams", strings.Join(getUpstreams(), ","),
+		"rate_limit", "umum 600/menit/IP, /api/limited-ping 10/menit/IP (fixed window di Redis)")
+	if err := http.ListenAndServe(":"+port, cors(httpx.Middleware(rateLimit(mux)))); err != nil {
 		panic(err)
 	}
+}
+
+// --- Rate limiting (fixed window per menit, per client IP, disimpan di Redis) ---
+//
+// Kenapa di Redis (bukan variabel lokal)? Karena gateway bisa banyak replica:
+// hitungan harus bersama agar limit tetap akurat. Fixed window: jendela
+// 60 detik yang tetap; hitungan di-INCR, hit pertama memasang EXPIRE 60 detik.
+// Bila Redis tak terjangkau, gateway FAIL-OPEN (request tetap dilayani) —
+// rate limiter tidak boleh ikut menjatuhkan layanan; kegagalannya tercatat di log.
+const (
+	rateLimitGeneralPerMin = 600
+	rateLimitPingPerMin    = 10
+	rateWindowSec          = 60
+)
+
+func rateLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ip := httpx.ClientIP(r)
+		limit, suffix := rateLimitGeneralPerMin, "all"
+		if r.URL.Path == "/api/limited-ping" {
+			limit, suffix = rateLimitPingPerMin, "ping"
+		}
+		count, ttl, err := rateRedis.IncrWindow("ratelimit:"+ip+":"+suffix, rateWindowSec)
+		if err != nil {
+			httpx.Log("warn", httpx.TraceID(r.Context()), "rate limiter: Redis tidak terjangkau, fail-open", "client_ip", ip, "error", err.Error())
+			next.ServeHTTP(w, r)
+			return
+		}
+		if count > int64(limit) {
+			if ttl <= 0 {
+				ttl = rateWindowSec
+			}
+			httpx.SetRateLimited(r.Context())
+			httpx.SetErrorKind(r.Context(), "rate_limited")
+			w.Header().Set("Retry-After", strconv.FormatInt(ttl, 10))
+			httpx.WriteJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error": "rate_limited", "limit": limit, "window_sec": rateWindowSec,
+				"retry_after_sec": ttl, "trace_id": httpx.TraceID(r.Context()),
+				"pesan": "Terlalu banyak request dari IP kamu. Coba lagi setelah Retry-After detik.",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,PUT,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Trace-Id, X-Admin-Token")
-		w.Header().Set("Access-Control-Expose-Headers", "X-Trace-Id, X-Cache")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Trace-Id, X-Admin-Token, X-User-Id")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Trace-Id, X-Cache, Retry-After")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(204)
 			return
@@ -102,36 +154,73 @@ func cors(next http.Handler) http.Handler {
 
 func route(w http.ResponseWriter, r *http.Request) {
 	trace := httpx.TraceID(r.Context())
+	ctx := r.Context()
 	p := r.URL.Path
 	switch {
 	case p == "/api/health/all":
+		httpx.SetEndpoint(ctx, "/api/health/all")
 		healthAll(w, r)
+	case p == "/api/whoami":
+		httpx.SetEndpoint(ctx, "/api/whoami")
+		whoami(w, r)
+	case p == "/api/limited-ping":
+		httpx.SetEndpoint(ctx, "/api/limited-ping")
+		httpx.WriteJSON(w, 200, map[string]any{"pong": true, "env": httpx.EnvName, "version": httpx.AppVersion,
+			"client_ip": httpx.ClientIP(r), "trace_id": trace,
+			"catatan": "Endpoint demo rate limit ketat: maks 10 request/menit/IP. Kelebihan akan dibalas 429 + Retry-After."})
 	case p == "/api/orders/whoami":
+		httpx.SetEndpoint(ctx, "/api/orders/whoami")
 		proxyOrder(w, r, "/whoami")
 	case p == "/api/ha/check":
+		httpx.SetEndpoint(ctx, "/api/ha/check")
 		haCheck(w, r)
 	case p == "/api/scheduler/status":
+		httpx.SetEndpoint(ctx, "/api/scheduler/status")
 		proxy(w, r, schedURL, "/status")
 	case p == "/api/scheduler/run-now":
+		httpx.SetEndpoint(ctx, "/api/scheduler/run-now")
 		proxy(w, r, schedURL, "/run-now")
 	case strings.HasPrefix(p, "/api/users"):
+		httpx.SetEndpoint(ctx, "/api/users")
 		proxy(w, r, userURL, strings.TrimPrefix(p, "/api"))
 	case strings.HasPrefix(p, "/api/cache"):
+		httpx.SetEndpoint(ctx, "/api/cache")
 		proxy(w, r, userURL, strings.TrimPrefix(p, "/api"))
 	case strings.HasPrefix(p, "/api/orders"):
+		httpx.SetEndpoint(ctx, "/api/orders")
 		proxyOrder(w, r, strings.TrimPrefix(p, "/api"))
 	case strings.HasPrefix(p, "/api/simulate"):
+		httpx.SetEndpoint(ctx, "/api/simulate")
 		proxyOrder(w, r, strings.TrimPrefix(p, "/api"))
 	case p == "/api/rabbitmq/publish":
+		httpx.SetEndpoint(ctx, "/api/rabbitmq/publish")
 		proxy(w, r, notifURL, "/publish")
 	case strings.HasPrefix(p, "/api/notifications"):
+		httpx.SetEndpoint(ctx, "/api/notifications")
 		proxy(w, r, notifURL, strings.TrimPrefix(p, "/api"))
 	case strings.HasPrefix(p, "/api/events"):
+		httpx.SetEndpoint(ctx, "/api/events")
 		proxy(w, r, notifURL, strings.TrimPrefix(p, "/api"))
 	default:
 		httpx.WriteJSON(w, 404, map[string]any{"error": "route tidak dikenal: " + p, "trace_id": trace,
-			"routes": []string{"/api/health/all", "/api/users", "/api/orders", "/api/cache", "/api/simulate/*", "/api/notifications", "/api/events", "/api/rabbitmq/publish", "/api/scheduler/status", "/api/scheduler/run-now", "/api/orders/whoami", "/api/ha/check"}})
+			"routes": []string{"/api/health/all", "/api/users", "/api/orders", "/api/cache", "/api/simulate/*", "/api/notifications", "/api/events", "/api/rabbitmq/publish", "/api/scheduler/status", "/api/scheduler/run-now", "/api/orders/whoami", "/api/ha/check", "/api/whoami", "/api/limited-ping"}})
 	}
+}
+
+// whoami: memperlihatkan identitas yang dilihat & dicatat server tentang
+// request ini — bahan belajar logging & forensik ("IP saya tercatat apa?").
+func whoami(w http.ResponseWriter, r *http.Request) {
+	info := httpx.ReqInfoFrom(r.Context())
+	uid := ""
+	if info != nil {
+		uid = info.UserID
+	}
+	httpx.WriteJSON(w, 200, map[string]any{
+		"service": "api-gateway", "env": httpx.EnvName, "version": httpx.AppVersion,
+		"client_ip": httpx.ClientIP(r), "user_agent": r.UserAgent(), "user_id": uid,
+		"trace_id": httpx.TraceID(r.Context()),
+		"catatan": "client_ip & user_agent persis seperti inilah yang tercatat di log (Loki) untuk setiap request kamu.",
+	})
 }
 
 // proxyOrder meneruskan ke salah satu upstream order-service (round-robin).
@@ -157,7 +246,12 @@ func proxy(w http.ResponseWriter, r *http.Request, target, restPath string) {
 	start := time.Now()
 	resp, err := proxyClient.Do(req)
 	if err != nil {
-		httpx.Log("error", trace, "downstream tidak terjangkau: "+err.Error(), "target", url)
+		kind := "downstream_error"
+		if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline") {
+			kind = "downstream_timeout"
+		}
+		httpx.SetErrorKind(r.Context(), kind)
+		httpx.Log("error", trace, "downstream tidak terjangkau: "+err.Error(), "target", url, "error_kind", kind)
 		httpx.WriteJSON(w, 502, map[string]any{"error": "downstream error: " + err.Error(), "trace_id": trace})
 		return
 	}

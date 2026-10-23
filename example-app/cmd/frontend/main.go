@@ -131,6 +131,14 @@ ul.feed{list-style:none;padding:0;margin:6px 0} ul.feed li{border-bottom:1px sol
 <button onclick="haCheck()">Hit Order-Service 10x — Replica Mana Saja yang Menjawab?</button>
 <div id="haOut" style="margin-top:8px"></div></section>
 
+<section><h2>I. Rate Limit &amp; Keamanan — Penjagaan Gateway</h2>
+<p class="note">Gateway sekarang memasang <b>rate limit per IP</b> yang dihitung di <b>Redis</b> (fixed window 60 detik): semua <code>/api/*</code> maks 600 request/menit/IP, dan endpoint demo <code>/api/limited-ping</code> diperketat jadi <b>10/menit/IP</b>. Kelebihan request dibalas <b>HTTP 429</b> + header <code>Retry-After</code>, dan tercatat di log sebagai <code>rate_limited=true</code> — bisa dicari di Loki &amp; jadi bahan alert.</p>
+<div id="secInfo" class="note">Mendeteksi IP kamu...</div>
+<button onclick="loadWhoami(true)">Cek IP Saya (GET /api/whoami)</button>
+<button class="danger" onclick="spamLimited()">Spam Endpoint Terbatas 15x (rasakan 429)</button>
+<div id="rlOut" style="margin-top:8px"></div>
+<p class="note">Perhatikan: 10 request pertama lolos (200), sisanya 429 sampai jendela 60 detik berganti. Karena hitungan disimpan di Redis, limit ini tetap akurat walau gateway punya banyak replica.</p></section>
+
 <section><h2>Panel Output</h2><pre id="out">// Hasil request terakhir tampil di sini (JSON + status + durasi + trace_id)</pre></section>
 </main>
 <script>
@@ -269,6 +277,36 @@ async function haCheck(){
     show('HA Check 10x', res.status, Math.round(performance.now()-t0), d.trace_id, d);
   }catch(e){ show('HA Check','ERROR',0,'',String(e)); }
 }
+async function loadWhoami(manual){
+  try{
+    var res = await fetch(GW + '/api/whoami');
+    var d = await res.json();
+    document.getElementById('secInfo').innerHTML =
+      'IP kamu terdeteksi server sebagai: <b>' + d.client_ip + '</b> | user-agent: <span class="small">' + d.user_agent + '</span><br>' +
+      '<span class="small">Begitu juga persisnya yang tercatat di setiap baris log (field client_ip) — itulah bahan melacak &amp; memblokir IP nakal.</span>';
+    if(manual) show('Whoami', res.status, 0, d.trace_id, d);
+  }catch(e){ if(manual) show('Whoami','ERROR',0,'',String(e)); }
+}
+async function spamLimited(){
+  var t0 = performance.now();
+  var hasil = [];
+  var n200 = 0, n429 = 0, retryAfter = '';
+  for(var i=1;i<=15;i++){
+    try{
+      var res = await fetch(GW + '/api/limited-ping');
+      var ra = res.headers.get('Retry-After');
+      if(res.status === 429){ n429++; if(ra) retryAfter = ra; } else if(res.status === 200){ n200++; }
+      hasil.push('#' + i + ' -> HTTP ' + res.status + (ra ? ' (Retry-After: ' + ra + ' detik)' : ''));
+      await res.text();
+    }catch(e){ hasil.push('#' + i + ' -> ERROR ' + e); }
+  }
+  document.getElementById('rlOut').innerHTML =
+    '<p class="note">Hasil spam 15x ke <code>/api/limited-ping</code>: <b>' + n200 + 'x 200</b>, <b>' + n429 + 'x 429</b>' +
+    (retryAfter ? ' | server meminta tunggu <b>' + retryAfter + ' detik</b> (header Retry-After)' : '') + '</p>' +
+    '<pre>' + hasil.join('\n') + '</pre>';
+  show('Spam Limited 15x', n429 ? 429 : 200, Math.round(performance.now()-t0), lastTrace,
+    'Ringkasan: ' + n200 + ' lolos, ' + n429 + ' ditolak rate limiter. Cari log-nya di Loki: {container=~"example-.+"} | json | status = 429 — lengkap dengan client_ip penembaknya.');
+}
 async function loadEnvInfo(){
   try{
     var res = await fetch(GW + '/api/health/all');
@@ -277,6 +315,6 @@ async function loadEnvInfo(){
     if(gw) document.getElementById('envInfo').textContent = gw.env + ' | versi gateway ' + gw.version;
   }catch(e){}
 }
-refreshOrders(false); refreshInbox(false); refreshSched(false); loadEnvInfo();
+refreshOrders(false); refreshInbox(false); refreshSched(false); loadEnvInfo(); loadWhoami(false);
 setInterval(refreshOrders, 5000); setInterval(refreshInbox, 4000); setInterval(refreshSched, 5000);
 </script></body></html>`

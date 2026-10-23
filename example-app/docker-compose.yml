@@ -70,7 +70,10 @@ services:
       SCHEDULER_SERVICE_URL: http://${NAME_PREFIX:-example-}scheduler:8080
       ORDER_UPSTREAMS: ${ORDER_UPSTREAMS:-http://${NAME_PREFIX:-example-}order-service:8080}
       GATEWAY_ADMIN_TOKEN: ${GATEWAY_ADMIN_TOKEN:-}
+      REDIS_ADDR: redis:6379
       PORT: "8080"
+    depends_on:
+      - redis
     ports:
       - "${GW_PORT:-18080}:8080"
     mem_limit: 96m

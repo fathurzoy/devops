@@ -127,3 +127,36 @@ func (c *Client) Incr(key string) (int64, error) {
 	n, _ := v.(int64)
 	return n, nil
 }
+
+// TTL mengembalikan sisa umur key dalam detik (-1 bila tanpa expire, -2 bila tidak ada).
+func (c *Client) TTL(key string) (int64, error) {
+	v, err := c.do("TTL", key)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := v.(int64)
+	return n, nil
+}
+
+// IncrWindow adalah penghitung FIXED WINDOW: INCR key; bila ini hit pertama
+// di jendela (nilai==1) pasang EXPIRE windowSec. Mengembalikan hitungan saat
+// ini dan sisa detik jendela (untuk header Retry-After rate limiter).
+// Catatan belajar: rangkaian INCR→EXPIRE→TTL ini tidak atomik 100% (beda
+// dengan skrip Lua), tetapi cukup & transparan untuk rate limit contoh ini.
+func (c *Client) IncrWindow(key string, windowSec int) (int64, int64, error) {
+	n, err := c.Incr(key)
+	if err != nil {
+		return 0, 0, err
+	}
+	if n == 1 {
+		if _, err := c.do("EXPIRE", key, strconv.Itoa(windowSec)); err != nil {
+			return n, int64(windowSec), nil
+		}
+		return n, int64(windowSec), nil
+	}
+	ttl, err := c.TTL(key)
+	if err != nil || ttl < 0 {
+		return n, int64(windowSec), nil
+	}
+	return n, ttl, nil
+}
